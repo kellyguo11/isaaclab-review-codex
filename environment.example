@@ -1,0 +1,12 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+ISAACLAB_REVIEW_BOT_DIR=/home/kellyg/Documents/isaac/isaaclab-review-codex
+ISAACLAB_REVIEW_APP_PRIVATE_KEY_PATH=/absolute/path/to/isaaclab-review-bot.private-key.pem
+ISAACLAB_REVIEW_APP_CLIENT_ID=Iv23liPhQICNbdPQ9bBU
+GITHUB_REPOSITORY=isaac-sim/IsaacLab
+OPENAI_API_KEY=
+OPENAI_REVIEW_MODEL=gpt-5.6
+OPENAI_REVIEW_REASONING_EFFORT=high

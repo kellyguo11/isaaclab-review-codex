@@ -1,0 +1,24 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+[Unit]
+Description=Isaac Lab GitHub App review bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=%h/.config/isaaclab-review-bot/environment
+ExecStart=/usr/bin/env uv --directory ${ISAACLAB_REVIEW_BOT_DIR} run --no-project python local_review_bot.py --watch
+Restart=always
+RestartSec=15
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
