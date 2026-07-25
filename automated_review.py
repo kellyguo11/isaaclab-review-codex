@@ -22,16 +22,17 @@ from dataclasses import dataclass
 from typing import Any
 
 _GITHUB_API_URL = "https://api.github.com"
-_OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+_NVIDIA_CHAT_COMPLETIONS_URL = "https://inference-api.nvidia.com/v1/chat/completions"
 _GITHUB_API_VERSION = "2022-11-28"
 _BOT_LOGIN = "isaaclab-review-bot[bot]"
 _MARKER_PREFIX = "isaaclab-review-bot:sha="
-_DEFAULT_MODEL = "gpt-5.6"
-_DEFAULT_REASONING_EFFORT = "high"
+_DEFAULT_MODEL = "azure/anthropic/claude-opus-4-6"
+_DEFAULT_FALLBACK_MODEL = "azure/anthropic/claude-sonnet-4-6"
 _MAX_CONTEXT_CHARS = 480_000
 _MAX_FILE_CHARS = 50_000
 _MAX_REVIEW_COMMENTS = 8
-_REQUEST_TIMEOUT_SECONDS = 1_200
+_MAX_MODEL_OUTPUT_TOKENS = 16_384
+_REQUEST_TIMEOUT_SECONDS = 600
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 _SEVERITY_ORDER = {"critical": 0, "warning": 1, "suggestion": 2}
 _SEVERITY_LABELS = {
@@ -65,9 +66,9 @@ def review_pull_request(
     repository: str,
     pull_request_number: int,
     github_token: str,
-    openai_api_key: str,
+    inference_api_key: str,
     model: str = _DEFAULT_MODEL,
-    reasoning_effort: str = _DEFAULT_REASONING_EFFORT,
+    fallback_model: str = _DEFAULT_FALLBACK_MODEL,
     dry_run: bool = False,
 ) -> ReviewStatus:
     """Review one pull request using a repository-scoped installation token.
@@ -76,9 +77,9 @@ def review_pull_request(
         repository: Repository in ``owner/name`` form.
         pull_request_number: Positive pull-request number.
         github_token: GitHub App installation token scoped only to ``repository``.
-        openai_api_key: OpenAI API key used for model requests.
-        model: OpenAI Responses API model.
-        reasoning_effort: Reasoning effort supplied to the model.
+        inference_api_key: NVIDIA inference API key used for model requests.
+        model: Primary NVIDIA inference model.
+        fallback_model: Model used when the primary inference model fails.
         dry_run: Print the proposed review without posting it.
 
     Returns:
@@ -114,13 +115,13 @@ def review_pull_request(
         return ReviewStatus.SKIPPED
 
     review_input = _build_review_input(repository, pull_request, changed_files, github_token)
-    specialist_results = _run_specialist_reviews(review_input.serialized, model, reasoning_effort, openai_api_key)
+    specialist_results = _run_specialist_reviews(review_input.serialized, model, fallback_model, inference_api_key)
     aggregated = _aggregate_reviews(
         review_input.serialized,
         specialist_results,
         model,
-        reasoning_effort,
-        openai_api_key,
+        fallback_model,
+        inference_api_key,
     )
     findings = _validate_findings(aggregated.get("findings"), review_input.valid_lines)
     body = _build_review_body(aggregated, findings, marker, review_input.truncated, preview=dry_run)
@@ -420,7 +421,7 @@ def _format_line_ranges(lines: set[int]) -> str:
 def _run_specialist_reviews(
     review_input: str,
     model: str,
-    reasoning_effort: str,
+    fallback_model: str,
     api_key: str,
 ) -> list[dict[str, Any]]:
     """Run independent specialist review passes concurrently."""
@@ -448,7 +449,7 @@ def _run_specialist_reviews(
                 instructions,
                 review_input,
                 model,
-                reasoning_effort,
+                fallback_model,
                 api_key,
             ): role_name
             for role_name, instructions in roles.items()
@@ -472,7 +473,7 @@ def _run_review_pass(
     role_instructions: str,
     review_input: str,
     model: str,
-    reasoning_effort: str,
+    fallback_model: str,
     api_key: str,
 ) -> dict[str, Any]:
     """Run one structured specialist review pass."""
@@ -493,16 +494,21 @@ Review rules:
 - Use critical only for correctness, security, data-loss, or severe compatibility defects.
 - Return at most eight findings, ordered by severity and impact.
 """
-    payload = _openai_payload(model, reasoning_effort, system_prompt, review_input, _specialist_schema())
-    response = _request_json(_OPENAI_RESPONSES_URL, api_key, method="POST", payload=payload)
-    return _extract_structured_output(response)
+    return _request_structured_completion(
+        model,
+        fallback_model,
+        system_prompt,
+        review_input,
+        _specialist_schema(),
+        api_key,
+    )
 
 
 def _aggregate_reviews(
     review_input: str,
     specialist_results: list[dict[str, Any]],
     model: str,
-    reasoning_effort: str,
+    fallback_model: str,
     api_key: str,
 ) -> dict[str, Any]:
     """Validate and combine specialist results into one coherent review."""
@@ -526,37 +532,61 @@ verdicts in the output schema. Human maintainers own approval decisions, so neve
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    payload = _openai_payload(model, reasoning_effort, system_prompt, aggregator_input, _aggregate_schema())
-    response = _request_json(_OPENAI_RESPONSES_URL, api_key, method="POST", payload=payload)
-    return _extract_structured_output(response)
+    return _request_structured_completion(
+        model,
+        fallback_model,
+        system_prompt,
+        aggregator_input,
+        _aggregate_schema(),
+        api_key,
+    )
 
 
-def _openai_payload(
+def _request_structured_completion(
     model: str,
-    reasoning_effort: str,
+    fallback_model: str,
+    system_prompt: str,
+    user_input: str,
+    output_schema: dict[str, Any],
+    api_key: str,
+) -> dict[str, Any]:
+    """Request one JSON result, falling back only after the primary model fails."""
+    candidates = tuple(dict.fromkeys(candidate for candidate in (model, fallback_model) if candidate))
+    failures: list[str] = []
+    for candidate in candidates:
+        try:
+            payload = _chat_completions_payload(candidate, system_prompt, user_input, output_schema)
+            response = _request_json(_NVIDIA_CHAT_COMPLETIONS_URL, api_key, method="POST", payload=payload)
+            return _extract_chat_completion_output(response)
+        except Exception as error:
+            failures.append(f"{candidate}: {error}")
+            print(f"Warning: NVIDIA inference model {candidate} failed: {error}", file=sys.stderr)
+    raise RuntimeError(f"NVIDIA inference failed for every configured model: {'; '.join(failures)}")
+
+
+def _chat_completions_payload(
+    model: str,
     system_prompt: str,
     user_input: str,
     output_schema: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build a Responses API request using strict structured output."""
+    """Build an OpenAI-compatible Chat Completions request for NVIDIA inference."""
+    schema = json.dumps(output_schema["schema"], ensure_ascii=False, separators=(",", ":"))
+    output_contract = f"""
+
+Output contract:
+- Return only one JSON object. Do not use Markdown fences or explanatory text.
+- The object must satisfy this JSON Schema exactly:
+{schema}
+"""
     return {
         "model": model,
-        "input": [
-            {"role": "system", "content": system_prompt},
+        "messages": [
+            {"role": "system", "content": system_prompt + output_contract},
             {"role": "user", "content": user_input},
         ],
-        "reasoning": {"effort": reasoning_effort},
-        "store": False,
-        "max_output_tokens": 8_000,
-        "text": {
-            "verbosity": "medium",
-            "format": {
-                "type": "json_schema",
-                "name": output_schema["name"],
-                "schema": output_schema["schema"],
-                "strict": True,
-            },
-        },
+        "max_tokens": _MAX_MODEL_OUTPUT_TOKENS,
+        "stream": False,
     }
 
 
@@ -615,27 +645,49 @@ def _finding_schema() -> dict[str, Any]:
     }
 
 
-def _extract_structured_output(response: dict[str, Any] | list[Any]) -> dict[str, Any]:
-    """Extract and parse the output-text item from a Responses API response."""
+def _extract_chat_completion_output(response: dict[str, Any] | list[Any]) -> dict[str, Any]:
+    """Extract one JSON object from an OpenAI-compatible chat completion."""
     if not isinstance(response, dict):
-        raise RuntimeError("OpenAI returned an invalid response payload.")
-    if response.get("status") != "completed":
-        details = response.get("incomplete_details") or response.get("error") or response.get("status")
-        raise RuntimeError(f"OpenAI response was not completed: {details}")
-    for output in response.get("output", []):
-        if not isinstance(output, dict) or output.get("type") != "message":
-            continue
-        for content in output.get("content", []):
-            if not isinstance(content, dict):
-                continue
-            if content.get("type") == "refusal":
-                raise RuntimeError(f"OpenAI refused the review request: {content.get('refusal', '')}")
-            if content.get("type") == "output_text":
-                parsed = json.loads(str(content.get("text", "")))
-                if not isinstance(parsed, dict):
-                    raise RuntimeError("OpenAI structured output was not a JSON object.")
-                return parsed
-    raise RuntimeError("OpenAI response did not contain an output-text item.")
+        raise RuntimeError("NVIDIA inference returned an invalid response payload.")
+    choices = response.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise RuntimeError("NVIDIA inference response did not contain a completion choice.")
+    message = choices[0].get("message")
+    if not isinstance(message, dict):
+        raise RuntimeError("NVIDIA inference response did not contain a completion message.")
+    if message.get("refusal"):
+        raise RuntimeError(f"NVIDIA inference refused the review request: {message['refusal']}")
+    content = message.get("content")
+    if isinstance(content, list):
+        content = "".join(
+            str(part.get("text", ""))
+            for part in content
+            if isinstance(part, dict) and part.get("type") in {"text", "output_text"}
+        )
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError("NVIDIA inference response did not contain text content.")
+    return _parse_json_object(content)
+
+
+def _parse_json_object(content: str) -> dict[str, Any]:
+    """Parse a JSON object while tolerating a provider-added Markdown fence."""
+    text = content.strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.DOTALL | re.IGNORECASE)
+    if fenced:
+        text = fenced.group(1).strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as error:
+        object_start = text.find("{")
+        if object_start < 0:
+            raise RuntimeError("NVIDIA inference did not return a JSON object.") from error
+        try:
+            parsed, _ = json.JSONDecoder().raw_decode(text[object_start:])
+        except json.JSONDecodeError as nested_error:
+            raise RuntimeError("NVIDIA inference returned malformed JSON.") from nested_error
+    if not isinstance(parsed, dict):
+        raise RuntimeError("NVIDIA inference output was not a JSON object.")
+    return parsed
 
 
 def _validate_findings(findings: Any, valid_lines: dict[str, set[int]]) -> list[dict[str, Any]]:

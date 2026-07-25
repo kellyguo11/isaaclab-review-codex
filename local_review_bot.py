@@ -53,9 +53,9 @@ class BotConfiguration:
     repository: str
     client_id: str
     private_key_path: Path
-    openai_api_key: str
+    inference_api_key: str
     model: str
-    reasoning_effort: str
+    fallback_model: str
 
 
 @dataclass(frozen=True)
@@ -158,9 +158,9 @@ def main() -> None:
             configuration.repository,
             arguments.pull_request_number,
             token,
-            configuration.openai_api_key,
+            configuration.inference_api_key,
             model=configuration.model,
-            reasoning_effort=configuration.reasoning_effort,
+            fallback_model=configuration.fallback_model,
             dry_run=arguments.dry_run,
         )
         return
@@ -225,21 +225,25 @@ def _load_configuration() -> BotConfiguration:
     """Load and validate runtime configuration from environment variables."""
     repository = os.environ.get("GITHUB_REPOSITORY", _DEFAULT_REPOSITORY).strip()
     client_id = os.environ.get("ISAACLAB_REVIEW_APP_CLIENT_ID", _DEFAULT_CLIENT_ID).strip()
+    model = os.environ.get("NVIDIA_REVIEW_MODEL", automated_review._DEFAULT_MODEL).strip()
+    fallback_model = os.environ.get(
+        "NVIDIA_REVIEW_FALLBACK_MODEL",
+        automated_review._DEFAULT_FALLBACK_MODEL,
+    ).strip()
     if repository != _DEFAULT_REPOSITORY:
         raise RuntimeError(f"This bot is locked to {_DEFAULT_REPOSITORY}, not {repository}.")
     if client_id != _DEFAULT_CLIENT_ID:
         raise RuntimeError(f"This bot is locked to GitHub App client ID {_DEFAULT_CLIENT_ID}.")
+    if not model:
+        raise RuntimeError("NVIDIA_REVIEW_MODEL must not be empty.")
     private_key_path = Path(_required_env("ISAACLAB_REVIEW_APP_PRIVATE_KEY_PATH")).expanduser().resolve()
     return BotConfiguration(
         repository=repository,
         client_id=client_id,
         private_key_path=private_key_path,
-        openai_api_key=_required_env("OPENAI_API_KEY"),
-        model=os.environ.get("OPENAI_REVIEW_MODEL", automated_review._DEFAULT_MODEL).strip(),
-        reasoning_effort=os.environ.get(
-            "OPENAI_REVIEW_REASONING_EFFORT",
-            automated_review._DEFAULT_REASONING_EFFORT,
-        ).strip(),
+        inference_api_key=_required_env("NVIDIA_INFERENCE_API_KEY"),
+        model=model,
+        fallback_model=fallback_model,
     )
 
 
@@ -387,9 +391,9 @@ def _poll_once(
                 configuration.repository,
                 item.number,
                 write_token,
-                configuration.openai_api_key,
+                configuration.inference_api_key,
                 model=configuration.model,
-                reasoning_effort=configuration.reasoning_effort,
+                fallback_model=configuration.fallback_model,
             )
         except Exception as error:
             print(f"Review of PR #{item.number} failed: {error}", file=sys.stderr)

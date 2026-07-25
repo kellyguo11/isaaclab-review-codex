@@ -49,9 +49,9 @@ def _configuration(local_bot, tmp_path: Path):
         repository="isaac-sim/IsaacLab",
         client_id="client-id",
         private_key_path=tmp_path / "private-key.pem",
-        openai_api_key="openai-key",
-        model="gpt-test",
-        reasoning_effort="medium",
+        inference_api_key="nvidia-key",
+        model="opus-test",
+        fallback_model="sonnet-test",
     )
 
 
@@ -71,6 +71,20 @@ def test_configuration_is_locked_to_isaaclab_repository(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="locked to isaac-sim/IsaacLab"):
         local_bot._load_configuration()
+
+
+def test_configuration_uses_nvidia_inference_models(monkeypatch, tmp_path) -> None:
+    """The daemon should use only the dedicated NVIDIA inference credential."""
+    local_bot = _load_local_bot()
+    monkeypatch.setenv("ISAACLAB_REVIEW_APP_PRIVATE_KEY_PATH", str(tmp_path / "app.pem"))
+    monkeypatch.setenv("NVIDIA_INFERENCE_API_KEY", "nvidia-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    configuration = local_bot._load_configuration()
+
+    assert configuration.inference_api_key == "nvidia-key"
+    assert configuration.model == "azure/anthropic/claude-opus-4-6"
+    assert configuration.fallback_model == "azure/anthropic/claude-sonnet-4-6"
 
 
 def test_create_app_jwt_uses_expected_claims_and_rs256(monkeypatch, tmp_path) -> None:
@@ -207,8 +221,8 @@ def test_poll_reviews_new_heads_with_write_installation_token(monkeypatch, tmp_p
     )
     reviews = []
 
-    def fake_review(repository, number, token, api_key, model, reasoning_effort):
-        reviews.append((repository, number, token, api_key, model, reasoning_effort))
+    def fake_review(repository, number, token, api_key, model, fallback_model):
+        reviews.append((repository, number, token, api_key, model, fallback_model))
         return local_bot.automated_review.ReviewStatus.POSTED
 
     monkeypatch.setattr(local_bot.automated_review, "review_pull_request", fake_review)
@@ -218,6 +232,6 @@ def test_poll_reviews_new_heads_with_write_installation_token(monkeypatch, tmp_p
     assert not initialized
     assert token_requests == [False, True]
     assert reviews == [
-        ("isaac-sim/IsaacLab", 10, "write-token", "openai-key", "gpt-test", "medium"),
+        ("isaac-sim/IsaacLab", 10, "write-token", "nvidia-key", "opus-test", "sonnet-test"),
     ]
     assert local_bot._load_state(state_file, configuration.repository) == {10: "new-head"}

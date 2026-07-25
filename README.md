@@ -2,8 +2,8 @@
 
 This repository contains the local, always-on reviewer for new pull requests to
 `isaac-sim/IsaacLab`. It polls GitHub from one maintainer-controlled machine,
-runs four structured review passes through the OpenAI Responses API, and posts
-one comment-only review as `isaaclab-review-bot[bot]`.
+runs four structured review passes through NVIDIA's OpenAI-compatible inference
+API, and posts one comment-only review as `isaaclab-review-bot[bot]`.
 
 The bot does not use GitHub Actions, `gh auth`, a personal access token, or a
 GitHub App user access token. It creates a GitHub App JWT from the
@@ -20,14 +20,21 @@ revision needs review.
 - [`uv`](https://docs.astral.sh/uv/)
 - OpenSSL
 - A GitHub App installation on `isaac-sim/IsaacLab`
-- A dedicated OpenAI API project service-account key
+- An NVIDIA inference API key
 
-Do not copy a personal Codex login or `~/.codex/auth.json` into the service.
-Although Codex CLI supports ChatGPT authentication, OpenAI advises against
-ChatGPT-managed automation for public or open-source repositories. Sign in to
-the OpenAI Platform with SSO, then create a project and service account named
-`isaaclab-review-bot`. Store only that service account's API key in the bot
-environment file.
+No OpenAI API key, Codex login, `~/.codex/auth.json`, or OpenClaw process is
+used. The model credential is sent only to the fixed endpoint
+`https://inference-api.nvidia.com/v1/chat/completions`.
+
+The former OpenClaw configuration maps to this service as follows:
+
+- Primary model: `azure/anthropic/claude-opus-4-6`
+- Fallback model: `azure/anthropic/claude-sonnet-4-6`
+- Three concurrent specialist passes
+- 600-second inference request timeout
+
+OpenClaw's workspace, memory search, image model, Slack channel, gateway,
+session, and tool settings are not needed for pull-request reviews.
 
 ## GitHub App configuration
 
@@ -59,14 +66,28 @@ install -m 600 environment.example \
 ```
 
 Edit `/home/kellyg/.config/isaaclab-review-bot/environment` and set the
-downloaded GitHub App key path and the dedicated OpenAI project
-service-account key. Never add `GH_TOKEN`, `GITHUB_TOKEN`,
+downloaded GitHub App key path and `NVIDIA_INFERENCE_API_KEY`. Never add
+`GH_TOKEN`, `GITHUB_TOKEN`,
 `GH_ENTERPRISE_TOKEN`, or `GITHUB_ENTERPRISE_TOKEN`; the process refuses to
 start when any of them is present.
 
-The default model is `gpt-5.6`, currently the alias for GPT-5.6 Sol. Change
-`OPENAI_REVIEW_MODEL` only after validating another model on representative
-Isaac Lab pull requests.
+The base URL is intentionally not configurable so a typo or compromised
+environment cannot redirect the NVIDIA key to another host. Set
+`NVIDIA_REVIEW_MODEL` and `NVIDIA_REVIEW_FALLBACK_MODEL` only to model IDs
+enabled for the NVIDIA key.
+
+Verify the key and model IDs without printing the key:
+
+```bash
+set -a
+source /home/kellyg/.config/isaaclab-review-bot/environment
+set +a
+curl --silent --show-error https://inference-api.nvidia.com/v1/models \
+  --header "Authorization: Bearer ${NVIDIA_INFERENCE_API_KEY}" \
+  | uv run --no-project python -c \
+    'import json,sys; print("\n".join(item["id"] for item in json.load(sys.stdin)["data"]))'
+unset NVIDIA_INFERENCE_API_KEY
+```
 
 ## One-shot dry run
 
@@ -80,13 +101,13 @@ set -a
 source /home/kellyg/.config/isaaclab-review-bot/environment
 set +a
 uv run --no-project python local_review_bot.py --pr-number 1234 --dry-run
-unset OPENAI_API_KEY
+unset NVIDIA_INFERENCE_API_KEY
 ```
 
 Replace `1234` with the test PR number. Dry-run mode authenticates as the App
-but requests a read-only installation token, so it cannot post. It still makes
-four billed model requests: three specialist passes and one final validation
-pass.
+but requests a read-only installation token, so it cannot post. It normally
+makes four model requests: three specialist passes and one final validation
+pass. A failed primary request is retried with the configured fallback model.
 
 ## Continuous user service
 

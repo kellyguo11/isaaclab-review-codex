@@ -89,21 +89,61 @@ def test_validate_findings_filters_invalid_locations_and_duplicates() -> None:
     assert validated == [findings[0]]
 
 
-def test_extract_structured_output_parses_output_text() -> None:
-    """A completed structured response should decode its JSON output text."""
+def test_extract_chat_completion_output_parses_json_content() -> None:
+    """An OpenAI-compatible chat response should decode its JSON content."""
     reviewer = _load_review_module()
     response = {
-        "status": "completed",
-        "output": [
-            {"type": "reasoning", "summary": []},
-            {
-                "type": "message",
-                "content": [{"type": "output_text", "text": '{"summary":"ok","findings":[]}'}],
-            },
+        "choices": [
+            {"message": {"role": "assistant", "content": '{"summary":"ok","findings":[]}'}},
         ],
     }
 
-    assert reviewer._extract_structured_output(response) == {"summary": "ok", "findings": []}
+    assert reviewer._extract_chat_completion_output(response) == {"summary": "ok", "findings": []}
+
+
+def test_extract_chat_completion_output_tolerates_json_fence() -> None:
+    """Provider-added JSON fences should not make an otherwise valid result fail."""
+    reviewer = _load_review_module()
+    response = {
+        "choices": [
+            {"message": {"role": "assistant", "content": '```json\n{"summary":"ok","findings":[]}\n```'}},
+        ],
+    }
+
+    assert reviewer._extract_chat_completion_output(response) == {"summary": "ok", "findings": []}
+
+
+def test_structured_completion_uses_nvidia_endpoint_and_fallback(monkeypatch) -> None:
+    """A failed primary request should retry once with the configured fallback model."""
+    reviewer = _load_review_module()
+    calls = []
+
+    def fake_request(url, token, method="GET", payload=None, accept="application/json", extra_headers=None):
+        calls.append((url, token, method, payload))
+        if payload["model"] == "primary-model":
+            raise RuntimeError("primary unavailable")
+        return {
+            "choices": [
+                {"message": {"role": "assistant", "content": '{"summary":"fallback","findings":[]}'}},
+            ],
+        }
+
+    monkeypatch.setattr(reviewer, "_request_json", fake_request)
+
+    result = reviewer._request_structured_completion(
+        "primary-model",
+        "fallback-model",
+        "Review carefully.",
+        '{"pull_request":{}}',
+        reviewer._specialist_schema(),
+        "nvidia-key",
+    )
+
+    assert result == {"summary": "fallback", "findings": []}
+    assert [call[3]["model"] for call in calls] == ["primary-model", "fallback-model"]
+    assert all(call[:3] == (reviewer._NVIDIA_CHAT_COMPLETIONS_URL, "nvidia-key", "POST") for call in calls)
+    assert calls[1][3]["messages"][0]["role"] == "system"
+    assert "JSON Schema" in calls[1][3]["messages"][0]["content"]
 
 
 def test_existing_review_requires_bot_login_and_matching_sha(monkeypatch) -> None:
