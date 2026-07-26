@@ -32,7 +32,7 @@ _DEFAULT_ENSEMBLE_MODEL = "azure/openai/gpt-5.6-sol"
 _MAX_CONTEXT_CHARS = 480_000
 _MAX_FILE_CHARS = 50_000
 _MAX_REVIEW_COMMENTS = 8
-_MAX_MODEL_OUTPUT_TOKENS = 16_384
+_MAX_MODEL_OUTPUT_TOKENS = 65_536
 _MAX_CONCURRENT_MODEL_REQUESTS = 3
 _PROGRESS_HEARTBEAT_SECONDS = 30
 _REQUEST_TIMEOUT_SECONDS = 600
@@ -761,7 +761,22 @@ def _extract_chat_completion_output(response: dict[str, Any] | list[Any]) -> dic
             if isinstance(part, dict) and part.get("type") in {"text", "output_text"}
         )
     if not isinstance(content, str) or not content.strip():
-        raise RuntimeError("NVIDIA inference response did not contain text content.")
+        choice = choices[0]
+        usage = response.get("usage")
+        usage = usage if isinstance(usage, dict) else {}
+        completion_details = usage.get("completion_tokens_details")
+        completion_details = completion_details if isinstance(completion_details, dict) else {}
+        provider_fields = message.get("provider_specific_fields")
+        provider_fields = provider_fields if isinstance(provider_fields, dict) else {}
+        thinking_blocks = provider_fields.get("thinking_blocks")
+        thinking_block_count = len(thinking_blocks) if isinstance(thinking_blocks, list) else 0
+        raise RuntimeError(
+            "NVIDIA inference response did not contain text content "
+            f"(finish_reason={choice.get('finish_reason')!r}, "
+            f"completion_tokens={usage.get('completion_tokens')!r}, "
+            f"reasoning_tokens={completion_details.get('reasoning_tokens')!r}, "
+            f"thinking_blocks={thinking_block_count})."
+        )
     return _parse_json_object(content)
 
 

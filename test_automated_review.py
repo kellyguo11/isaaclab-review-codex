@@ -113,6 +113,33 @@ def test_extract_chat_completion_output_tolerates_json_fence() -> None:
     assert reviewer._extract_chat_completion_output(response) == {"summary": "ok", "findings": []}
 
 
+def test_extract_chat_completion_output_diagnoses_exhausted_reasoning_budget() -> None:
+    """An empty reasoning response should report safe metadata instead of model text."""
+    reviewer = _load_review_module()
+    response = {
+        "choices": [
+            {
+                "finish_reason": "length",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "provider_specific_fields": {"thinking_blocks": [{"type": "thinking"}]},
+                },
+            },
+        ],
+        "usage": {
+            "completion_tokens": 16_384,
+            "completion_tokens_details": {"reasoning_tokens": 16_384},
+        },
+    }
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"finish_reason='length'.*completion_tokens=16384.*reasoning_tokens=16384.*thinking_blocks=1",
+    ):
+        reviewer._extract_chat_completion_output(response)
+
+
 def test_aggregate_completion_uses_nvidia_endpoint_and_fallback(monkeypatch) -> None:
     """A failed primary aggregation should retry with the other ensemble model."""
     reviewer = _load_review_module()
@@ -143,6 +170,7 @@ def test_aggregate_completion_uses_nvidia_endpoint_and_fallback(monkeypatch) -> 
     assert all(call[:3] == (reviewer._NVIDIA_CHAT_COMPLETIONS_URL, "nvidia-key", "POST") for call in calls)
     assert calls[1][3]["messages"][0]["role"] == "system"
     assert "JSON Schema" in calls[1][3]["messages"][0]["content"]
+    assert calls[1][3]["max_tokens"] == 65_536
 
 
 def test_specialist_ensemble_runs_every_role_on_every_model(monkeypatch) -> None:

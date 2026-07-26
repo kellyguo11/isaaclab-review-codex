@@ -13,6 +13,8 @@ Each model independently runs three specialist passes: Isaac Lab correctness,
 silent-failure analysis, and test analysis. Opus 5 then aggregates all six
 results into one review; GPT-5.6 Sol handles aggregation if Opus is unavailable.
 A normal review therefore makes seven NVIDIA inference requests.
+Each request allows up to 65,536 output tokens so reasoning models have enough
+budget to produce their final structured answer.
 
 The bot calls NVIDIA's OpenAI-compatible
 `https://inference-api.nvidia.com/v1/chat/completions` endpoint directly. It
