@@ -13,7 +13,7 @@ Type=simple
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=%h/.config/isaaclab-review-bot/environment
-ExecStart=/usr/bin/env uv --directory ${ISAACLAB_REVIEW_BOT_DIR} run --no-project python local_review_bot.py --watch
+ExecStart=/usr/bin/env bash ${ISAACLAB_REVIEW_BOT_DIR}/launch_review_bot.sh --watch
 Restart=always
 RestartSec=15
 UMask=0077

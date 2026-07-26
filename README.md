@@ -112,6 +112,12 @@ chmod 600 \
 The NVIDIA endpoint is intentionally fixed in the code so an environment typo
 cannot redirect the inference key to another host.
 
+The executable `launch_review_bot.sh` loads this owner-only environment file,
+clears any personal GitHub tokens inherited from the shell, and starts the bot
+from the correct repository directory. With no arguments, it starts the
+continuous watcher. To keep the environment file elsewhere, set
+`ISAACLAB_REVIEW_BOT_ENV_FILE` to its absolute path before launching.
+
 ## 4. Verify NVIDIA access
 
 Load the private environment into the current shell:
@@ -147,12 +153,7 @@ post:
 
 ```bash
 cd /absolute/path/to/isaaclab-review-codex
-unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
-set -a
-source "${HOME}/.config/isaaclab-review-bot/environment"
-set +a
-uv run --no-project python local_review_bot.py --pr-number 1234 --dry-run
-unset NVIDIA_INFERENCE_API_KEY
+./launch_review_bot.sh --pr-number 1234 --dry-run
 ```
 
 Replace `1234` with an existing non-draft IsaacLab PR number.
@@ -164,12 +165,7 @@ App:
 
 ```bash
 cd /absolute/path/to/isaaclab-review-codex
-unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
-set -a
-source "${HOME}/.config/isaaclab-review-bot/environment"
-set +a
-uv run --no-project python local_review_bot.py --pr-number 1234
-unset NVIDIA_INFERENCE_API_KEY
+./launch_review_bot.sh --pr-number 1234
 ```
 
 The bot posts a `COMMENT` review only. It never approves a PR or requests
@@ -181,20 +177,16 @@ For a temporary foreground session:
 
 ```bash
 cd /absolute/path/to/isaaclab-review-codex
-unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
-set -a
-source "${HOME}/.config/isaaclab-review-bot/environment"
-set +a
-uv run --no-project python local_review_bot.py --watch
+./launch_review_bot.sh
 ```
 
 On first startup, the watcher records all current non-draft open PR heads
 without reviewing them. New PRs and later head revisions are then reviewed.
 
 To intentionally review every currently open non-draft PR when initializing a
-new state file, use `--watch --backfill`. This can post many reviews and incur
-many inference requests, so stop the systemd service first and use it only
-deliberately.
+new state file, use `./launch_review_bot.sh --watch --backfill`. This can post
+many reviews and incur many inference requests, so stop the systemd service
+first and use it only deliberately.
 
 Press `Ctrl+C` to stop a foreground watcher.
 
@@ -279,5 +271,6 @@ uv sync
 uv run pytest
 uv run ruff check .
 uv run ruff format --check .
+bash -n launch_review_bot.sh
 systemd-analyze --user verify isaaclab-review-bot.service
 ```
