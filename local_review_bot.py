@@ -193,7 +193,8 @@ def _parse_arguments(arguments: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--watch", action="store_true", help="continuously monitor non-draft open pull requests")
-    mode.add_argument("--pr-number", dest="pull_request_number", type=_positive_integer, help="review one pull request")
+    mode.add_argument("--pr", dest="pull_request_number", type=_positive_integer, help="review one pull request")
+    mode.add_argument("--pr-number", dest="pull_request_number", type=_positive_integer, help=argparse.SUPPRESS)
     parser.add_argument("--dry-run", action="store_true", help="print a one-shot review using a read-only App token")
     parser.add_argument(
         "--backfill",
@@ -209,7 +210,7 @@ def _parse_arguments(arguments: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--state-file", type=Path, help="override the persistent monitor state file")
     parsed = parser.parse_args(arguments)
     if parsed.dry_run and parsed.pull_request_number is None:
-        parser.error("--dry-run requires --pr-number")
+        parser.error("--dry-run requires --pr")
     if parsed.backfill and not parsed.watch:
         parser.error("--backfill requires --watch")
     return parsed

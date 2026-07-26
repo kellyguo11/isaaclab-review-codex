@@ -54,6 +54,16 @@ def _configuration(local_bot, tmp_path: Path):
     )
 
 
+def test_parse_arguments_uses_short_pr_option() -> None:
+    """The one-shot command should expose the concise ``--pr`` option."""
+    local_bot = _load_local_bot()
+
+    arguments = local_bot._parse_arguments(["--pr", "6704", "--dry-run"])
+
+    assert arguments.pull_request_number == 6704
+    assert arguments.dry_run
+
+
 def test_rejects_inherited_personal_github_token(monkeypatch) -> None:
     """The daemon should fail closed when a personal GitHub token is inherited."""
     local_bot = _load_local_bot()

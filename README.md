@@ -153,7 +153,7 @@ post:
 
 ```bash
 cd /absolute/path/to/isaaclab-review-codex
-./launch_review_bot.sh --pr-number 1234 --dry-run
+./launch_review_bot.sh --pr 1234 --dry-run
 ```
 
 Replace `1234` with an existing non-draft IsaacLab PR number.
@@ -165,7 +165,7 @@ App:
 
 ```bash
 cd /absolute/path/to/isaaclab-review-codex
-./launch_review_bot.sh --pr-number 1234
+./launch_review_bot.sh --pr 1234
 ```
 
 The bot posts a `COMMENT` review only. It never approves a PR or requests
