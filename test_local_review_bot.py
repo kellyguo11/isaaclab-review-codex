@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import base64
+import datetime
 import importlib.util
 import json
 import stat
@@ -215,12 +216,38 @@ def test_first_poll_baselines_existing_pull_requests_without_reviewing(monkeypat
     assert stat.S_IMODE(state_file.stat().st_mode) == 0o600
 
 
-def test_poll_reviews_new_heads_with_write_installation_token(monkeypatch, tmp_path) -> None:
-    """An unseen PR head should be reviewed and persisted."""
+def test_poll_does_not_review_new_commit_on_seen_pull_request(monkeypatch, tmp_path) -> None:
+    """A later head on a known PR should wait for an explicit review command."""
     local_bot = _load_local_bot()
     configuration = _configuration(local_bot, tmp_path)
     state_file = tmp_path / "state.json"
     local_bot._save_state(state_file, configuration.repository, {10: "old-head"})
+    token_requests = []
+    provider = SimpleNamespace(get_token=lambda write: token_requests.append(write) or "read-token")
+    monkeypatch.setattr(
+        local_bot,
+        "_list_open_pull_requests",
+        lambda repository, token: [local_bot.PullRequestHead(number=10, head_sha="new-head")],
+    )
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("a commit on an existing PR must not trigger a full review")
+
+    monkeypatch.setattr(local_bot.automated_review, "review_pull_request", fail_if_called)
+
+    initialized = local_bot._poll_once(configuration, provider, state_file, backfill=False)
+
+    assert not initialized
+    assert token_requests == [False]
+    assert local_bot._load_state(state_file, configuration.repository) == {10: "old-head"}
+
+
+def test_poll_reviews_new_pull_request_once_and_preserves_prior_state(monkeypatch, tmp_path) -> None:
+    """A new PR number should be reviewed while seen and closed PRs stay recorded."""
+    local_bot = _load_local_bot()
+    configuration = _configuration(local_bot, tmp_path)
+    state_file = tmp_path / "state.json"
+    local_bot._save_state(state_file, configuration.repository, {10: "initial-head", 11: "closed-head"})
     token_requests = []
     provider = SimpleNamespace(
         get_token=lambda write: token_requests.append(write) or ("write-token" if write else "read-token")
@@ -228,7 +255,10 @@ def test_poll_reviews_new_heads_with_write_installation_token(monkeypatch, tmp_p
     monkeypatch.setattr(
         local_bot,
         "_list_open_pull_requests",
-        lambda repository, token: [local_bot.PullRequestHead(number=10, head_sha="new-head")],
+        lambda repository, token: [
+            local_bot.PullRequestHead(number=10, head_sha="later-head"),
+            local_bot.PullRequestHead(number=20, head_sha="new-head"),
+        ],
     )
     reviews = []
 
@@ -243,6 +273,155 @@ def test_poll_reviews_new_heads_with_write_installation_token(monkeypatch, tmp_p
     assert not initialized
     assert token_requests == [False, True]
     assert reviews == [
-        ("isaac-sim/IsaacLab", 10, "write-token", "nvidia-key", ("opus-test", "gpt-test")),
+        ("isaac-sim/IsaacLab", 20, "write-token", "nvidia-key", ("opus-test", "gpt-test")),
     ]
-    assert local_bot._load_state(state_file, configuration.repository) == {10: "new-head"}
+    assert local_bot._load_state(state_file, configuration.repository) == {
+        10: "initial-head",
+        11: "closed-head",
+        20: "new-head",
+    }
+
+
+def test_review_command_matching_and_authorization() -> None:
+    """Only exact commands from a PR author or trusted collaborator should run."""
+    local_bot = _load_local_bot()
+    pull_request = {"user": {"login": "external-author"}}
+
+    assert local_bot._is_review_command("@isaaclab-review-bot review")
+    assert local_bot._is_review_command("  /isaaclab-review  ")
+    assert not local_bot._is_review_command("please @isaaclab-review-bot review this")
+    assert local_bot._is_authorized_review_request(
+        {"user": {"login": "external-author"}, "author_association": "NONE"},
+        pull_request,
+    )
+    assert local_bot._is_authorized_review_request(
+        {"user": {"login": "maintainer"}, "author_association": "MEMBER"},
+        pull_request,
+    )
+    assert not local_bot._is_authorized_review_request(
+        {"user": {"login": "unrelated-user"}, "author_association": "NONE"},
+        pull_request,
+    )
+    assert not local_bot._is_authorized_review_request(
+        {"user": {"login": "isaaclab-review-bot[bot]"}, "author_association": "MEMBER"},
+        pull_request,
+    )
+
+
+def test_first_command_poll_baselines_without_processing_old_comments(tmp_path) -> None:
+    """A fresh command cursor should ignore comments made before monitoring starts."""
+    local_bot = _load_local_bot()
+    configuration = _configuration(local_bot, tmp_path)
+    command_state_file = tmp_path / "state-commands.json"
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("initializing the command cursor must not call GitHub")
+
+    provider = SimpleNamespace(get_token=fail_if_called)
+
+    local_bot._poll_review_commands(configuration, provider, command_state_file)
+
+    state = local_bot._load_command_state(command_state_file, configuration.repository)
+    assert state is not None
+    assert not state.processed_comment_ids
+    assert stat.S_IMODE(command_state_file.stat().st_mode) == 0o600
+
+
+def test_pr_author_command_reviews_current_head_once(monkeypatch, tmp_path) -> None:
+    """A PR author conversation command should launch one current-head review."""
+    local_bot = _load_local_bot()
+    configuration = _configuration(local_bot, tmp_path)
+    command_state_file = tmp_path / "state-commands.json"
+    local_bot._save_command_state(
+        command_state_file,
+        configuration.repository,
+        local_bot._CommandPollState(
+            updated_after=datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc),
+            processed_comment_ids=frozenset(),
+        ),
+    )
+    comment = {
+        "id": 123,
+        "body": "@isaaclab-review-bot review",
+        "issue_url": "https://api.github.com/repos/isaac-sim/IsaacLab/issues/20",
+        "user": {"login": "external-author"},
+        "author_association": "NONE",
+    }
+    monkeypatch.setattr(
+        local_bot,
+        "_list_updated_issue_comments",
+        lambda repository, token, updated_after: [comment],
+    )
+    monkeypatch.setattr(
+        local_bot.automated_review,
+        "_github_json",
+        lambda path, token: {"state": "open", "head": {"sha": "current-head"}, "user": {"login": "external-author"}},
+    )
+    token_requests = []
+    provider = SimpleNamespace(
+        get_token=lambda write: token_requests.append(write) or ("write-token" if write else "read-token")
+    )
+    reviews = []
+
+    def fake_review(repository, number, token, api_key, models):
+        reviews.append((repository, number, token, api_key, models))
+        return local_bot.automated_review.ReviewStatus.POSTED
+
+    monkeypatch.setattr(local_bot.automated_review, "review_pull_request", fake_review)
+
+    local_bot._poll_review_commands(configuration, provider, command_state_file)
+
+    assert token_requests == [False, True]
+    assert reviews == [
+        ("isaac-sim/IsaacLab", 20, "write-token", "nvidia-key", ("opus-test", "gpt-test")),
+    ]
+    state = local_bot._load_command_state(command_state_file, configuration.repository)
+    assert state is not None
+    assert state.processed_comment_ids == frozenset({123})
+
+
+def test_untrusted_commenter_cannot_trigger_review(monkeypatch, tmp_path) -> None:
+    """A non-author without repository association should not spend inference."""
+    local_bot = _load_local_bot()
+    configuration = _configuration(local_bot, tmp_path)
+    command_state_file = tmp_path / "state-commands.json"
+    local_bot._save_command_state(
+        command_state_file,
+        configuration.repository,
+        local_bot._CommandPollState(
+            updated_after=datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc),
+            processed_comment_ids=frozenset(),
+        ),
+    )
+    monkeypatch.setattr(
+        local_bot,
+        "_list_updated_issue_comments",
+        lambda repository, token, updated_after: [
+            {
+                "id": 456,
+                "body": "/isaaclab-review",
+                "issue_url": "https://api.github.com/repos/isaac-sim/IsaacLab/issues/20",
+                "user": {"login": "unrelated-user"},
+                "author_association": "NONE",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        local_bot.automated_review,
+        "_github_json",
+        lambda path, token: {"state": "open", "head": {"sha": "current-head"}, "user": {"login": "pr-author"}},
+    )
+    token_requests = []
+    provider = SimpleNamespace(get_token=lambda write: token_requests.append(write) or "read-token")
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("an untrusted commenter must not trigger model inference")
+
+    monkeypatch.setattr(local_bot.automated_review, "review_pull_request", fail_if_called)
+
+    local_bot._poll_review_commands(configuration, provider, command_state_file)
+
+    assert token_requests == [False]
+    state = local_bot._load_command_state(command_state_file, configuration.repository)
+    assert state is not None
+    assert state.processed_comment_ids == frozenset({456})

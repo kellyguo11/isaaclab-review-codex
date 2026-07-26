@@ -28,7 +28,11 @@ import automated_review
 _DEFAULT_REPOSITORY = "isaac-sim/IsaacLab"
 _DEFAULT_CLIENT_ID = "Iv23liPhQICNbdPQ9bBU"
 _EXPECTED_APP_SLUG = "isaaclab-review-bot"
+_REVIEW_COMMANDS = frozenset({"@isaaclab-review-bot review", "/isaaclab-review"})
+_TRUSTED_AUTHOR_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 _DEFAULT_POLL_INTERVAL_SECONDS = 60
+_COMMENT_CURSOR_OVERLAP_SECONDS = 2
+_MAX_PROCESSED_COMMANDS = 10_000
 _TOKEN_REFRESH_BUFFER_SECONDS = 300
 _FORBIDDEN_USER_TOKEN_ENV_VARS = (
     "GH_TOKEN",
@@ -63,6 +67,14 @@ class _CachedToken:
 
     value: str
     expires_at: float
+
+
+@dataclass(frozen=True)
+class _CommandPollState:
+    """Cursor and handled commands for repository issue-comment polling."""
+
+    updated_after: datetime.datetime
+    processed_comment_ids: frozenset[int]
 
 
 class GitHubAppTokenProvider:
@@ -343,13 +355,18 @@ def _github_app_json(
 
 def _parse_github_timestamp(value: str) -> float:
     """Parse an ISO 8601 timestamp returned by GitHub."""
+    return _parse_github_datetime(value).timestamp()
+
+
+def _parse_github_datetime(value: str) -> datetime.datetime:
+    """Parse an ISO 8601 timestamp returned by GitHub."""
     try:
         parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as error:
-        raise RuntimeError(f"GitHub returned an invalid token expiration timestamp: {value!r}.") from error
+        raise RuntimeError(f"GitHub returned an invalid timestamp: {value!r}.") from error
     if parsed.tzinfo is None:
-        raise RuntimeError(f"GitHub returned a timezone-free token expiration timestamp: {value!r}.")
-    return parsed.timestamp()
+        raise RuntimeError(f"GitHub returned a timezone-free timestamp: {value!r}.")
+    return parsed.astimezone(datetime.timezone.utc)
 
 
 def _watch_pull_requests(
@@ -359,10 +376,11 @@ def _watch_pull_requests(
     poll_interval_seconds: int,
     backfill: bool,
 ) -> None:
-    """Continuously poll for new non-draft pull-request revisions."""
+    """Continuously poll for new pull requests and explicit review commands."""
+    command_state_file = _command_state_file(state_file)
     automated_review._progress(
         f"Monitoring {configuration.repository} every {poll_interval_seconds}s as the GitHub App installation. "
-        f"State: {state_file}"
+        f"State: {state_file}; commands: {command_state_file}"
     )
     first_poll = True
     while True:
@@ -370,11 +388,13 @@ def _watch_pull_requests(
             initialized = _poll_once(configuration, provider, state_file, backfill=backfill and first_poll)
             first_poll = False
             if initialized:
-                automated_review._progress(
-                    "Monitor baseline initialized; future PRs and head updates will be reviewed."
-                )
+                automated_review._progress("Monitor baseline initialized; future new PRs will be reviewed once.")
         except Exception as error:
-            automated_review._progress(f"Review-bot poll failed: {error}", error=True)
+            automated_review._progress(f"Automatic PR poll failed: {error}", error=True)
+        try:
+            _poll_review_commands(configuration, provider, command_state_file)
+        except Exception as error:
+            automated_review._progress(f"Review-command poll failed: {error}", error=True)
         automated_review._progress(f"Poll complete; next poll in {poll_interval_seconds}s.")
         time.sleep(poll_interval_seconds)
 
@@ -385,7 +405,7 @@ def _poll_once(
     state_file: Path,
     backfill: bool,
 ) -> bool:
-    """Poll once and review every unseen non-draft pull-request head.
+    """Poll once and review every unseen non-draft pull request.
 
     Returns:
         Whether a new state file was initialized without backfilling.
@@ -401,21 +421,20 @@ def _poll_once(
     if state is None:
         state = {}
 
-    open_numbers = {item.number for item in pull_requests}
-    state = {number: head_sha for number, head_sha in state.items() if number in open_numbers}
-    unseen = [item for item in pull_requests if state.get(item.number) != item.head_sha]
+    unseen = [item for item in pull_requests if item.number not in state]
     if unseen:
         automated_review._progress(
-            f"Detected {len(unseen)} new or updated pull-request heads: "
-            f"{', '.join(f'#{item.number}' for item in unseen)}."
+            f"Detected {len(unseen)} new pull requests: {', '.join(f'#{item.number}' for item in unseen)}."
         )
     else:
-        automated_review._progress("No new or updated pull-request heads detected.")
+        automated_review._progress("No new pull requests detected.")
     for item in pull_requests:
-        if state.get(item.number) == item.head_sha:
+        if item.number in state:
             continue
         try:
-            automated_review._progress(f"Starting automated review for PR #{item.number} at {item.head_sha[:12]}.")
+            automated_review._progress(
+                f"Starting initial automated review for PR #{item.number} at {item.head_sha[:12]}."
+            )
             write_token = provider.get_token(write=True)
             status = automated_review.review_pull_request(
                 configuration.repository,
@@ -427,13 +446,160 @@ def _poll_once(
         except Exception as error:
             automated_review._progress(f"Review of PR #{item.number} failed: {error}", error=True)
             continue
-        automated_review._progress(f"Review attempt for PR #{item.number} finished with status: {status.value}.")
+        automated_review._progress(f"Initial review for PR #{item.number} finished with status: {status.value}.")
         if status is not automated_review.ReviewStatus.STALE:
             state[item.number] = item.head_sha
             _save_state(state_file, configuration.repository, state)
 
     _save_state(state_file, configuration.repository, state)
     return False
+
+
+def _poll_review_commands(
+    configuration: BotConfiguration,
+    provider: GitHubAppTokenProvider,
+    command_state_file: Path,
+) -> None:
+    """Review current PR heads when an authorized conversation comment requests it."""
+    poll_started_at = datetime.datetime.now(datetime.timezone.utc)
+    state = _load_command_state(command_state_file, configuration.repository)
+    if state is None:
+        _save_command_state(
+            command_state_file,
+            configuration.repository,
+            _CommandPollState(updated_after=poll_started_at, processed_comment_ids=frozenset()),
+        )
+        automated_review._progress(
+            "Review-command baseline initialized. Developers can comment "
+            "'@isaaclab-review-bot review' on a PR to request another review."
+        )
+        return
+
+    read_token = provider.get_token(write=False)
+    since = state.updated_after - datetime.timedelta(seconds=_COMMENT_CURSOR_OVERLAP_SECONDS)
+    comments = _list_updated_issue_comments(configuration.repository, read_token, since)
+    processed_comment_ids = set(state.processed_comment_ids)
+    commands = [
+        comment
+        for comment in comments
+        if _is_review_command(comment.get("body")) and comment.get("id") not in processed_comment_ids
+    ]
+    if commands:
+        automated_review._progress(f"Detected {len(commands)} new review command comments.")
+
+    for comment in commands:
+        comment_id = comment.get("id")
+        if not isinstance(comment_id, int):
+            continue
+        processed_comment_ids.add(comment_id)
+        pull_request_number = _comment_pull_request_number(comment, configuration.repository)
+        commenter = _nested_string(comment, "user", "login")
+        if pull_request_number is None:
+            automated_review._progress(
+                f"Ignoring review command comment {comment_id}: it is not attached to an IsaacLab pull request."
+            )
+            continue
+        try:
+            pull_request = automated_review._github_json(
+                f"/repos/{configuration.repository}/pulls/{pull_request_number}",
+                read_token,
+            )
+        except Exception as error:
+            automated_review._progress(
+                f"Could not load PR #{pull_request_number} for review command {comment_id}: {error}",
+                error=True,
+            )
+            continue
+        if not isinstance(pull_request, dict):
+            automated_review._progress(
+                f"Ignoring review command comment {comment_id}: GitHub returned invalid PR metadata.",
+                error=True,
+            )
+            continue
+        if not _is_authorized_review_request(comment, pull_request):
+            automated_review._progress(
+                f"Ignoring review command from {commenter or '<unknown>'} on PR #{pull_request_number}: "
+                "only the PR author or a repository collaborator may trigger the bot."
+            )
+            continue
+
+        automated_review._progress(
+            f"Accepted review command {comment_id} from {commenter} on PR #{pull_request_number}."
+        )
+        try:
+            write_token = provider.get_token(write=True)
+            status = automated_review.review_pull_request(
+                configuration.repository,
+                pull_request_number,
+                write_token,
+                configuration.inference_api_key,
+                models=configuration.review_models,
+            )
+        except Exception as error:
+            automated_review._progress(
+                f"Commanded review of PR #{pull_request_number} failed: {error}",
+                error=True,
+            )
+            continue
+        automated_review._progress(
+            f"Commanded review of PR #{pull_request_number} finished with status: {status.value}."
+        )
+
+    retained_ids = frozenset(sorted(processed_comment_ids)[-_MAX_PROCESSED_COMMANDS:])
+    _save_command_state(
+        command_state_file,
+        configuration.repository,
+        _CommandPollState(updated_after=poll_started_at, processed_comment_ids=retained_ids),
+    )
+
+
+def _list_updated_issue_comments(
+    repository: str,
+    token: str,
+    updated_after: datetime.datetime,
+) -> list[dict[str, Any]]:
+    """List repository conversation comments updated after a UTC cursor."""
+    timestamp = _format_github_datetime(updated_after)
+    encoded_timestamp = urllib.parse.quote(timestamp, safe="")
+    return automated_review._github_paginate(
+        f"/repos/{repository}/issues/comments?sort=updated&direction=asc&since={encoded_timestamp}",
+        token,
+    )
+
+
+def _is_review_command(body: Any) -> bool:
+    """Return whether a comment body is an exact supported review command."""
+    return isinstance(body, str) and " ".join(body.split()).casefold() in _REVIEW_COMMANDS
+
+
+def _comment_pull_request_number(comment: dict[str, Any], repository: str) -> int | None:
+    """Extract the PR number from a trusted repository issue URL."""
+    issue_url = comment.get("issue_url")
+    prefix = f"{automated_review._GITHUB_API_URL}/repos/{repository}/issues/"
+    if not isinstance(issue_url, str) or not issue_url.startswith(prefix):
+        return None
+    number = issue_url.removeprefix(prefix)
+    return int(number) if number.isdigit() and int(number) > 0 else None
+
+
+def _is_authorized_review_request(comment: dict[str, Any], pull_request: dict[str, Any]) -> bool:
+    """Allow the PR author and trusted repository collaborators to request reviews."""
+    commenter = _nested_string(comment, "user", "login")
+    if not commenter or commenter.casefold() == automated_review._BOT_LOGIN.casefold():
+        return False
+    pull_request_author = _nested_string(pull_request, "user", "login")
+    association = str(comment.get("author_association") or "").upper()
+    return commenter.casefold() == pull_request_author.casefold() or association in _TRUSTED_AUTHOR_ASSOCIATIONS
+
+
+def _nested_string(value: dict[str, Any], *keys: str) -> str:
+    """Read a nested string from a JSON object."""
+    current: Any = value
+    for key in keys:
+        if not isinstance(current, dict):
+            return ""
+        current = current.get(key)
+    return current if isinstance(current, str) else ""
 
 
 def _list_open_pull_requests(repository: str, token: str) -> list[PullRequestHead]:
@@ -461,6 +627,11 @@ def _default_state_file() -> Path:
     return base_path / "isaaclab-review-bot" / "state.json"
 
 
+def _command_state_file(state_file: Path) -> Path:
+    """Return the review-command cursor file beside the PR state file."""
+    return state_file.with_name(f"{state_file.stem}-commands{state_file.suffix}")
+
+
 def _load_state(state_file: Path, repository: str) -> dict[int, str] | None:
     """Load monitor state or return :obj:`None` when it has not been initialized."""
     if not state_file.exists():
@@ -482,12 +653,62 @@ def _load_state(state_file: Path, repository: str) -> dict[int, str] | None:
 
 def _save_state(state_file: Path, repository: str, heads: dict[int, str]) -> None:
     """Atomically save monitor state with owner-only permissions."""
-    state_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     payload = {
         "version": 1,
         "repository": repository,
         "heads": {str(number): head_sha for number, head_sha in sorted(heads.items())},
     }
+    _save_private_json(state_file, payload)
+
+
+def _load_command_state(command_state_file: Path, repository: str) -> _CommandPollState | None:
+    """Load the review-command cursor or return :obj:`None` before initialization."""
+    if not command_state_file.exists():
+        return None
+    try:
+        data = json.loads(command_state_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Could not load review-command state from {command_state_file}: {error}.") from error
+    if not isinstance(data, dict) or data.get("version") != 1 or data.get("repository") != repository:
+        raise RuntimeError(f"Review-command state does not match repository {repository}: {command_state_file}.")
+    processed_comment_ids = data.get("processed_comment_ids")
+    if not isinstance(processed_comment_ids, list):
+        raise RuntimeError(f"Review-command state has invalid processed comment IDs: {command_state_file}.")
+    try:
+        comment_ids = frozenset(int(comment_id) for comment_id in processed_comment_ids)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError(f"Review-command state contains an invalid comment ID: {command_state_file}.") from error
+    return _CommandPollState(
+        updated_after=_parse_github_datetime(str(data.get("updated_after") or "")),
+        processed_comment_ids=comment_ids,
+    )
+
+
+def _save_command_state(
+    command_state_file: Path,
+    repository: str,
+    state: _CommandPollState,
+) -> None:
+    """Atomically save the review-command cursor with owner-only permissions."""
+    payload = {
+        "version": 1,
+        "repository": repository,
+        "updated_after": _format_github_datetime(state.updated_after),
+        "processed_comment_ids": sorted(state.processed_comment_ids),
+    }
+    _save_private_json(command_state_file, payload)
+
+
+def _format_github_datetime(value: datetime.datetime) -> str:
+    """Format a timezone-aware datetime as a whole-second UTC timestamp."""
+    if value.tzinfo is None:
+        raise ValueError("GitHub timestamps must be timezone-aware.")
+    return value.astimezone(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _save_private_json(state_file: Path, payload: dict[str, Any]) -> None:
+    """Atomically save JSON with owner-only permissions."""
+    state_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(

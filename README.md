@@ -2,7 +2,9 @@
 
 This repository contains the local, always-on reviewer for new pull requests to
 `isaac-sim/IsaacLab`. It polls GitHub from one maintainer-controlled machine
-and posts one comment-only review as `isaaclab-review-bot[bot]`.
+and posts one initial comment-only review as `isaaclab-review-bot[bot]`.
+Subsequent commits are reviewed only when an authorized developer requests
+another review from the PR conversation.
 
 Every pull request is reviewed by a two-model ensemble:
 
@@ -58,6 +60,11 @@ Configure `isaaclab-review-bot` with these repository permissions:
 
 - Contents: read
 - Pull requests: read and write
+
+The Pull requests permission also allows the App to read PR conversation
+comments through GitHub's
+[shared issue-comments endpoint](https://docs.github.com/en/rest/issues/comments#list-issue-comments-for-a-repository).
+No Issues permission or user authorization is required.
 
 Install it with **Only select repositories** and select only
 `isaac-sim/IsaacLab`. Do not enable user authorization and do not create a
@@ -182,8 +189,10 @@ cd /absolute/path/to/isaaclab-review-codex
 ./launch_review_bot.sh
 ```
 
-On first startup, the watcher records all current non-draft open PR heads
-without reviewing them. New PRs and later head revisions are then reviewed.
+On first startup, the watcher records all current non-draft open PR numbers
+without reviewing them. Each later PR is reviewed once when it first becomes
+open and ready for review. New commits and force-pushes on a known PR do not
+trigger automatic full reviews.
 The bot prints timestamped progress for every poll, GitHub authentication step,
 specialist model request, aggregation request, and posting attempt. Model calls
 can take several minutes; the bot prints a waiting heartbeat every 30 seconds
@@ -193,6 +202,21 @@ To intentionally review every currently open non-draft PR when initializing a
 new state file, use `./launch_review_bot.sh --watch --backfill`. This can post
 many reviews and incur many inference requests, so stop the systemd service
 first and use it only deliberately.
+
+### Request another review from a PR
+
+After pushing new commits, the PR author or a repository owner, member, or
+collaborator can add this exact conversation comment:
+
+```text
+@isaaclab-review-bot review
+```
+
+`/isaaclab-review` is also accepted. The watcher sees the command on its next
+poll and reviews the PR's current head. Put the command in a normal PR
+conversation comment, not an inline code-review comment. A command for a head
+the bot already reviewed is acknowledged in the local log and skipped before
+inference, preventing duplicate reviews and model spend.
 
 Press `Ctrl+C` to stop a foreground watcher.
 
@@ -254,6 +278,12 @@ or service configuration.
 - Installation tokens expire and are refreshed automatically.
 - State is stored at
   `${HOME}/.local/state/isaaclab-review-bot/state.json` with mode `0600`.
+- The review-command cursor is stored beside it in `state-commands.json`, also
+  with mode `0600`.
+- Seen PR numbers remain in state, so later commits do not trigger automatic
+  reviews.
+- Only a PR author or a repository owner, member, or collaborator can trigger
+  an on-demand review comment.
 - The reviewed commit SHA is embedded in each bot review to prevent duplicate
   reviews after ordinary restarts.
 - A PR head is rechecked immediately before posting; a result is discarded if
