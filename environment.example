@@ -3,10 +3,10 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-ISAACLAB_REVIEW_BOT_DIR=/home/kellyg/Documents/isaac/isaaclab-review-codex
+ISAACLAB_REVIEW_BOT_DIR=/absolute/path/to/isaaclab-review-codex
 ISAACLAB_REVIEW_APP_PRIVATE_KEY_PATH=/absolute/path/to/isaaclab-review-bot.private-key.pem
 ISAACLAB_REVIEW_APP_CLIENT_ID=Iv23liPhQICNbdPQ9bBU
 GITHUB_REPOSITORY=isaac-sim/IsaacLab
 NVIDIA_INFERENCE_API_KEY=
-NVIDIA_REVIEW_MODEL=azure/anthropic/claude-opus-4-6
-NVIDIA_REVIEW_FALLBACK_MODEL=azure/anthropic/claude-sonnet-4-6
+NVIDIA_REVIEW_MODEL=azure/anthropic/claude-opus-5
+NVIDIA_REVIEW_FALLBACK_MODEL=azure/openai/gpt-5.6-sol

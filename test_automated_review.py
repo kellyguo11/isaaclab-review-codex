@@ -113,8 +113,8 @@ def test_extract_chat_completion_output_tolerates_json_fence() -> None:
     assert reviewer._extract_chat_completion_output(response) == {"summary": "ok", "findings": []}
 
 
-def test_structured_completion_uses_nvidia_endpoint_and_fallback(monkeypatch) -> None:
-    """A failed primary request should retry once with the configured fallback model."""
+def test_aggregate_completion_uses_nvidia_endpoint_and_fallback(monkeypatch) -> None:
+    """A failed primary aggregation should retry with the other ensemble model."""
     reviewer = _load_review_module()
     calls = []
 
@@ -130,9 +130,8 @@ def test_structured_completion_uses_nvidia_endpoint_and_fallback(monkeypatch) ->
 
     monkeypatch.setattr(reviewer, "_request_json", fake_request)
 
-    result = reviewer._request_structured_completion(
-        "primary-model",
-        "fallback-model",
+    result = reviewer._request_aggregate_completion(
+        ("primary-model", "ensemble-model"),
         "Review carefully.",
         '{"pull_request":{}}',
         reviewer._specialist_schema(),
@@ -140,10 +139,36 @@ def test_structured_completion_uses_nvidia_endpoint_and_fallback(monkeypatch) ->
     )
 
     assert result == {"summary": "fallback", "findings": []}
-    assert [call[3]["model"] for call in calls] == ["primary-model", "fallback-model"]
+    assert [call[3]["model"] for call in calls] == ["primary-model", "ensemble-model"]
     assert all(call[:3] == (reviewer._NVIDIA_CHAT_COMPLETIONS_URL, "nvidia-key", "POST") for call in calls)
     assert calls[1][3]["messages"][0]["role"] == "system"
     assert "JSON Schema" in calls[1][3]["messages"][0]["content"]
+
+
+def test_specialist_ensemble_runs_every_role_on_every_model(monkeypatch) -> None:
+    """Each specialist role should receive independent results from both models."""
+    reviewer = _load_review_module()
+    calls = []
+
+    def fake_review_pass(role_name, role_instructions, review_input, model, api_key):
+        calls.append((role_name, model, review_input, api_key))
+        return {"summary": f"{role_name} from {model}", "findings": []}
+
+    monkeypatch.setattr(reviewer, "_run_review_pass", fake_review_pass)
+
+    results = reviewer._run_specialist_reviews("review-input", ("opus-model", "gpt-model"), "nvidia-key")
+
+    assert len(results) == 6
+    assert {(role, model) for role, model, _, _ in calls} == {
+        (role, model)
+        for role in ("isaaclab_correctness", "silent_failure_hunter", "test_analyzer")
+        for model in ("opus-model", "gpt-model")
+    }
+    assert {(result["review_pass"], result["model"]) for result in results} == {
+        (role, model)
+        for role in ("isaaclab_correctness", "silent_failure_hunter", "test_analyzer")
+        for model in ("opus-model", "gpt-model")
+    }
 
 
 def test_existing_review_requires_bot_login_and_matching_sha(monkeypatch) -> None:

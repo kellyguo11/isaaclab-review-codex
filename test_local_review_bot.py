@@ -50,8 +50,7 @@ def _configuration(local_bot, tmp_path: Path):
         client_id="client-id",
         private_key_path=tmp_path / "private-key.pem",
         inference_api_key="nvidia-key",
-        model="opus-test",
-        fallback_model="sonnet-test",
+        review_models=("opus-test", "gpt-test"),
     )
 
 
@@ -83,8 +82,10 @@ def test_configuration_uses_nvidia_inference_models(monkeypatch, tmp_path) -> No
     configuration = local_bot._load_configuration()
 
     assert configuration.inference_api_key == "nvidia-key"
-    assert configuration.model == "azure/anthropic/claude-opus-4-6"
-    assert configuration.fallback_model == "azure/anthropic/claude-sonnet-4-6"
+    assert configuration.review_models == (
+        "azure/anthropic/claude-opus-5",
+        "azure/openai/gpt-5.6-sol",
+    )
 
 
 def test_create_app_jwt_uses_expected_claims_and_rs256(monkeypatch, tmp_path) -> None:
@@ -221,8 +222,8 @@ def test_poll_reviews_new_heads_with_write_installation_token(monkeypatch, tmp_p
     )
     reviews = []
 
-    def fake_review(repository, number, token, api_key, model, fallback_model):
-        reviews.append((repository, number, token, api_key, model, fallback_model))
+    def fake_review(repository, number, token, api_key, models):
+        reviews.append((repository, number, token, api_key, models))
         return local_bot.automated_review.ReviewStatus.POSTED
 
     monkeypatch.setattr(local_bot.automated_review, "review_pull_request", fake_review)
@@ -232,6 +233,6 @@ def test_poll_reviews_new_heads_with_write_installation_token(monkeypatch, tmp_p
     assert not initialized
     assert token_requests == [False, True]
     assert reviews == [
-        ("isaac-sim/IsaacLab", 10, "write-token", "nvidia-key", "opus-test", "sonnet-test"),
+        ("isaac-sim/IsaacLab", 10, "write-token", "nvidia-key", ("opus-test", "gpt-test")),
     ]
     assert local_bot._load_state(state_file, configuration.repository) == {10: "new-head"}

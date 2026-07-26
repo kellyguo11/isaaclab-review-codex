@@ -26,12 +26,13 @@ _NVIDIA_CHAT_COMPLETIONS_URL = "https://inference-api.nvidia.com/v1/chat/complet
 _GITHUB_API_VERSION = "2022-11-28"
 _BOT_LOGIN = "isaaclab-review-bot[bot]"
 _MARKER_PREFIX = "isaaclab-review-bot:sha="
-_DEFAULT_MODEL = "azure/anthropic/claude-opus-4-6"
-_DEFAULT_FALLBACK_MODEL = "azure/anthropic/claude-sonnet-4-6"
+_DEFAULT_MODEL = "azure/anthropic/claude-opus-5"
+_DEFAULT_ENSEMBLE_MODEL = "azure/openai/gpt-5.6-sol"
 _MAX_CONTEXT_CHARS = 480_000
 _MAX_FILE_CHARS = 50_000
 _MAX_REVIEW_COMMENTS = 8
 _MAX_MODEL_OUTPUT_TOKENS = 16_384
+_MAX_CONCURRENT_MODEL_REQUESTS = 3
 _REQUEST_TIMEOUT_SECONDS = 600
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 _SEVERITY_ORDER = {"critical": 0, "warning": 1, "suggestion": 2}
@@ -67,8 +68,7 @@ def review_pull_request(
     pull_request_number: int,
     github_token: str,
     inference_api_key: str,
-    model: str = _DEFAULT_MODEL,
-    fallback_model: str = _DEFAULT_FALLBACK_MODEL,
+    models: tuple[str, ...] = (_DEFAULT_MODEL, _DEFAULT_ENSEMBLE_MODEL),
     dry_run: bool = False,
 ) -> ReviewStatus:
     """Review one pull request using a repository-scoped installation token.
@@ -78,8 +78,7 @@ def review_pull_request(
         pull_request_number: Positive pull-request number.
         github_token: GitHub App installation token scoped only to ``repository``.
         inference_api_key: NVIDIA inference API key used for model requests.
-        model: Primary NVIDIA inference model.
-        fallback_model: Model used when the primary inference model fails.
+        models: NVIDIA inference models that independently review the pull request.
         dry_run: Print the proposed review without posting it.
 
     Returns:
@@ -92,6 +91,8 @@ def review_pull_request(
     """
     if pull_request_number <= 0:
         raise ValueError(f"Invalid pull-request number: {pull_request_number}.")
+    if len(set(models)) < 2 or any(not model for model in models):
+        raise ValueError("At least two distinct, non-empty review models are required.")
     _verify_installation_token(repository, github_token)
     pull_request = _github_json(f"/repos/{repository}/pulls/{pull_request_number}", github_token)
     if not isinstance(pull_request, dict):
@@ -115,12 +116,11 @@ def review_pull_request(
         return ReviewStatus.SKIPPED
 
     review_input = _build_review_input(repository, pull_request, changed_files, github_token)
-    specialist_results = _run_specialist_reviews(review_input.serialized, model, fallback_model, inference_api_key)
+    specialist_results = _run_specialist_reviews(review_input.serialized, models, inference_api_key)
     aggregated = _aggregate_reviews(
         review_input.serialized,
         specialist_results,
-        model,
-        fallback_model,
+        models,
         inference_api_key,
     )
     findings = _validate_findings(aggregated.get("findings"), review_input.valid_lines)
@@ -420,11 +420,10 @@ def _format_line_ranges(lines: set[int]) -> str:
 
 def _run_specialist_reviews(
     review_input: str,
-    model: str,
-    fallback_model: str,
+    models: tuple[str, ...],
     api_key: str,
 ) -> list[dict[str, Any]]:
-    """Run independent specialist review passes concurrently."""
+    """Run every specialist pass on every ensemble model."""
     roles = {
         "isaaclab_correctness": (
             "Trace implementation correctness and Isaac Lab-specific behavior: tensor shapes, devices and dtypes; "
@@ -441,7 +440,10 @@ def _run_specialist_reviews(
         ),
     }
     results: list[dict[str, Any]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(roles)) as executor:
+    request_count = len(roles) * len(models)
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(_MAX_CONCURRENT_MODEL_REQUESTS, request_count)
+    ) as executor:
         futures = {
             executor.submit(
                 _run_review_pass,
@@ -449,22 +451,27 @@ def _run_specialist_reviews(
                 instructions,
                 review_input,
                 model,
-                fallback_model,
                 api_key,
-            ): role_name
+            ): (role_name, model)
             for role_name, instructions in roles.items()
+            for model in models
         }
         for future in concurrent.futures.as_completed(futures):
-            role_name = futures[future]
+            role_name, model = futures[future]
             try:
                 result = future.result()
             except Exception as error:
-                print(f"Warning: {role_name} review pass failed: {error}", file=sys.stderr)
+                print(f"Warning: {role_name} review pass with {model} failed: {error}", file=sys.stderr)
                 continue
             result["review_pass"] = role_name
+            result["model"] = model
             results.append(result)
     if not results:
         raise RuntimeError("All specialist review passes failed; no review was posted.")
+    successful_models = {str(result.get("model")) for result in results}
+    missing_models = sorted(set(models) - successful_models)
+    if missing_models:
+        print(f"Warning: no specialist review succeeded for models: {', '.join(missing_models)}.", file=sys.stderr)
     return results
 
 
@@ -473,7 +480,6 @@ def _run_review_pass(
     role_instructions: str,
     review_input: str,
     model: str,
-    fallback_model: str,
     api_key: str,
 ) -> dict[str, Any]:
     """Run one structured specialist review pass."""
@@ -494,9 +500,8 @@ Review rules:
 - Use critical only for correctness, security, data-loss, or severe compatibility defects.
 - Return at most eight findings, ordered by severity and impact.
 """
-    return _request_structured_completion(
+    return _request_model_completion(
         model,
-        fallback_model,
         system_prompt,
         review_input,
         _specialist_schema(),
@@ -507,8 +512,7 @@ Review rules:
 def _aggregate_reviews(
     review_input: str,
     specialist_results: list[dict[str, Any]],
-    model: str,
-    fallback_model: str,
+    models: tuple[str, ...],
     api_key: str,
 ) -> dict[str, Any]:
     """Validate and combine specialist results into one coherent review."""
@@ -532,9 +536,8 @@ verdicts in the output schema. Human maintainers own approval decisions, so neve
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    return _request_structured_completion(
-        model,
-        fallback_model,
+    return _request_aggregate_completion(
+        models,
         system_prompt,
         aggregator_input,
         _aggregate_schema(),
@@ -542,26 +545,35 @@ verdicts in the output schema. Human maintainers own approval decisions, so neve
     )
 
 
-def _request_structured_completion(
-    model: str,
-    fallback_model: str,
+def _request_aggregate_completion(
+    models: tuple[str, ...],
     system_prompt: str,
     user_input: str,
     output_schema: dict[str, Any],
     api_key: str,
 ) -> dict[str, Any]:
-    """Request one JSON result, falling back only after the primary model fails."""
-    candidates = tuple(dict.fromkeys(candidate for candidate in (model, fallback_model) if candidate))
+    """Aggregate ensemble results, trying each model in configured order."""
     failures: list[str] = []
-    for candidate in candidates:
+    for model in models:
         try:
-            payload = _chat_completions_payload(candidate, system_prompt, user_input, output_schema)
-            response = _request_json(_NVIDIA_CHAT_COMPLETIONS_URL, api_key, method="POST", payload=payload)
-            return _extract_chat_completion_output(response)
+            return _request_model_completion(model, system_prompt, user_input, output_schema, api_key)
         except Exception as error:
-            failures.append(f"{candidate}: {error}")
-            print(f"Warning: NVIDIA inference model {candidate} failed: {error}", file=sys.stderr)
+            failures.append(f"{model}: {error}")
+            print(f"Warning: aggregation with NVIDIA inference model {model} failed: {error}", file=sys.stderr)
     raise RuntimeError(f"NVIDIA inference failed for every configured model: {'; '.join(failures)}")
+
+
+def _request_model_completion(
+    model: str,
+    system_prompt: str,
+    user_input: str,
+    output_schema: dict[str, Any],
+    api_key: str,
+) -> dict[str, Any]:
+    """Request and decode one structured completion from one ensemble model."""
+    payload = _chat_completions_payload(model, system_prompt, user_input, output_schema)
+    response = _request_json(_NVIDIA_CHAT_COMPLETIONS_URL, api_key, method="POST", payload=payload)
+    return _extract_chat_completion_output(response)
 
 
 def _chat_completions_payload(

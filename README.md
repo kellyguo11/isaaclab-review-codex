@@ -1,159 +1,283 @@
 # Isaac Lab review bot
 
 This repository contains the local, always-on reviewer for new pull requests to
-`isaac-sim/IsaacLab`. It polls GitHub from one maintainer-controlled machine,
-runs four structured review passes through NVIDIA's OpenAI-compatible inference
-API, and posts one comment-only review as `isaaclab-review-bot[bot]`.
+`isaac-sim/IsaacLab`. It polls GitHub from one maintainer-controlled machine
+and posts one comment-only review as `isaaclab-review-bot[bot]`.
 
-The bot does not use GitHub Actions, `gh auth`, a personal access token, or a
-GitHub App user access token. It creates a GitHub App JWT from the
-`isaaclab-review-bot` private key and exchanges that JWT for short-lived
-installation tokens scoped to only `isaac-sim/IsaacLab`.
+Every pull request is reviewed by a two-model ensemble:
 
-The poller normally uses a read-only installation token. It mints a separate
-token with pull-request write permission only when a new non-draft PR or head
-revision needs review.
+- `azure/anthropic/claude-opus-5`
+- `azure/openai/gpt-5.6-sol`
+
+Each model independently runs three specialist passes: Isaac Lab correctness,
+silent-failure analysis, and test analysis. Opus 5 then aggregates all six
+results into one review; GPT-5.6 Sol handles aggregation if Opus is unavailable.
+A normal review therefore makes seven NVIDIA inference requests.
+
+The bot calls NVIDIA's OpenAI-compatible
+`https://inference-api.nvidia.com/v1/chat/completions` endpoint directly. It
+does not require OpenClaw, Slack, an OpenClaw gateway, an OpenAI API key, a
+Codex login, or `~/.codex/auth.json`.
 
 ## Requirements
 
 - Linux with Python 3.11 or newer
 - [`uv`](https://docs.astral.sh/uv/)
 - OpenSSL
+- Git and SSH access to this private repository
 - A GitHub App installation on `isaac-sim/IsaacLab`
-- An NVIDIA inference API key
+- An NVIDIA inference API key with access to both ensemble models
 
-No OpenAI API key, Codex login, `~/.codex/auth.json`, or OpenClaw process is
-used. The model credential is sent only to the fixed endpoint
-`https://inference-api.nvidia.com/v1/chat/completions`.
+Only one machine should run the continuous watcher at a time.
 
-The former OpenClaw configuration maps to this service as follows:
+## 1. Clone on a new machine
 
-- Primary model: `azure/anthropic/claude-opus-4-6`
-- Fallback model: `azure/anthropic/claude-sonnet-4-6`
-- Three concurrent specialist passes
-- 600-second inference request timeout
+```bash
+git clone git@github.com:kellyguo11/isaaclab-review-codex.git
+cd isaaclab-review-codex
+pwd -P
+```
 
-OpenClaw's workspace, memory search, image model, Slack channel, gateway,
-session, and tool settings are not needed for pull-request reviews.
+Keep the absolute path printed by `pwd -P`; it becomes
+`ISAACLAB_REVIEW_BOT_DIR`.
 
-## GitHub App configuration
+Install the development dependencies and verify the checkout:
+
+```bash
+uv sync
+uv run pytest
+```
+
+Runtime code itself uses only the Python standard library.
+
+## 2. Configure the GitHub App
 
 Configure `isaaclab-review-bot` with these repository permissions:
 
 - Contents: read
 - Pull requests: read and write
 
-Install the App with **Only select repositories** and select only
-`isaac-sim/IsaacLab`. Do not enable user authorization or create a personal
-token for the bot.
+Install it with **Only select repositories** and select only
+`isaac-sim/IsaacLab`. Do not enable user authorization and do not create a
+personal access token for the bot.
 
-Generate an App private key and store it outside this repository:
+From the GitHub App's settings, generate a private key. Store the downloaded
+PEM outside the repository with owner-only permissions:
 
 ```bash
-install -d -m 700 /home/kellyg/.config/isaaclab-review-bot
+install -d -m 700 "${HOME}/.config/isaaclab-review-bot"
 install -m 600 /path/to/downloaded-private-key.pem \
-  /home/kellyg/.config/isaaclab-review-bot/app-private-key.pem
+  "${HOME}/.config/isaaclab-review-bot/app-private-key.pem"
 ```
 
-## Private environment file
+Replace `/path/to/downloaded-private-key.pem` with the downloaded file.
 
-Create the service environment:
+## 3. Create the private environment file
+
+From the cloned repository:
 
 ```bash
-cd /home/kellyg/Documents/isaac/isaaclab-review-codex
 install -m 600 environment.example \
-  /home/kellyg/.config/isaaclab-review-bot/environment
+  "${HOME}/.config/isaaclab-review-bot/environment"
 ```
 
-Edit `/home/kellyg/.config/isaaclab-review-bot/environment` and set the
-downloaded GitHub App key path and `NVIDIA_INFERENCE_API_KEY`. Never add
-`GH_TOKEN`, `GITHUB_TOKEN`,
-`GH_ENTERPRISE_TOKEN`, or `GITHUB_ENTERPRISE_TOKEN`; the process refuses to
-start when any of them is present.
+Edit `${HOME}/.config/isaaclab-review-bot/environment`:
 
-The base URL is intentionally not configurable so a typo or compromised
-environment cannot redirect the NVIDIA key to another host. Set
-`NVIDIA_REVIEW_MODEL` and `NVIDIA_REVIEW_FALLBACK_MODEL` only to model IDs
-enabled for the NVIDIA key.
+```text
+ISAACLAB_REVIEW_BOT_DIR=/absolute/path/from/pwd
+ISAACLAB_REVIEW_APP_PRIVATE_KEY_PATH=/home/your-user/.config/isaaclab-review-bot/app-private-key.pem
+ISAACLAB_REVIEW_APP_CLIENT_ID=Iv23liPhQICNbdPQ9bBU
+GITHUB_REPOSITORY=isaac-sim/IsaacLab
+NVIDIA_INFERENCE_API_KEY=<PASTE-THE-NVIDIA-KEY-HERE>
+NVIDIA_REVIEW_MODEL=azure/anthropic/claude-opus-5
+NVIDIA_REVIEW_FALLBACK_MODEL=azure/openai/gpt-5.6-sol
+```
 
-Verify the key and model IDs without printing the key:
+Despite its legacy name, `NVIDIA_REVIEW_FALLBACK_MODEL` is always used as the
+second ensemble reviewer. It is also the fallback for final aggregation when
+the primary model fails.
+
+Do not put quotes around values unless a path contains spaces. Do not commit
+this environment file or paste either private key into an issue, pull request,
+or chat.
+
+Enforce owner-only permissions:
 
 ```bash
+chmod 600 \
+  "${HOME}/.config/isaaclab-review-bot/environment" \
+  "${HOME}/.config/isaaclab-review-bot/app-private-key.pem"
+```
+
+The NVIDIA endpoint is intentionally fixed in the code so an environment typo
+cannot redirect the inference key to another host.
+
+## 4. Verify NVIDIA access
+
+Load the private environment into the current shell:
+
+```bash
+unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
 set -a
-source /home/kellyg/.config/isaaclab-review-bot/environment
+source "${HOME}/.config/isaaclab-review-bot/environment"
 set +a
+```
+
+List the model IDs enabled for the key:
+
+```bash
 curl --silent --show-error https://inference-api.nvidia.com/v1/models \
   --header "Authorization: Bearer ${NVIDIA_INFERENCE_API_KEY}" \
   | uv run --no-project python -c \
     'import json,sys; print("\n".join(item["id"] for item in json.load(sys.stdin)["data"]))'
+```
+
+Confirm that both configured model IDs appear. When finished with the
+interactive shell:
+
+```bash
 unset NVIDIA_INFERENCE_API_KEY
 ```
 
-## One-shot dry run
+## 5. Run a safe dry run
 
-Use an existing non-draft pull request to verify authentication and review
-quality without allowing a GitHub write:
+A dry run reads one non-draft PR, runs the full seven-request ensemble, and
+prints the proposed review. It requests a read-only GitHub App token and cannot
+post:
 
 ```bash
-cd /home/kellyg/Documents/isaac/isaaclab-review-codex
+cd /absolute/path/to/isaaclab-review-codex
 unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
 set -a
-source /home/kellyg/.config/isaaclab-review-bot/environment
+source "${HOME}/.config/isaaclab-review-bot/environment"
 set +a
 uv run --no-project python local_review_bot.py --pr-number 1234 --dry-run
 unset NVIDIA_INFERENCE_API_KEY
 ```
 
-Replace `1234` with the test PR number. Dry-run mode authenticates as the App
-but requests a read-only installation token, so it cannot post. It normally
-makes four model requests: three specialist passes and one final validation
-pass. A failed primary request is retried with the configured fallback model.
+Replace `1234` with an existing non-draft IsaacLab PR number.
 
-## Continuous user service
+## 6. Run one posting review
 
-Install and start the user service:
+After inspecting a dry run, omit `--dry-run` to post one review as the GitHub
+App:
 
 ```bash
-install -d -m 700 /home/kellyg/.config/systemd/user
-install -d -m 700 /home/kellyg/.local/state/isaaclab-review-bot
+cd /absolute/path/to/isaaclab-review-codex
+unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+set -a
+source "${HOME}/.config/isaaclab-review-bot/environment"
+set +a
+uv run --no-project python local_review_bot.py --pr-number 1234
+unset NVIDIA_INFERENCE_API_KEY
+```
+
+The bot posts a `COMMENT` review only. It never approves a PR or requests
+changes.
+
+## 7. Run the watcher in the foreground
+
+For a temporary foreground session:
+
+```bash
+cd /absolute/path/to/isaaclab-review-codex
+unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+set -a
+source "${HOME}/.config/isaaclab-review-bot/environment"
+set +a
+uv run --no-project python local_review_bot.py --watch
+```
+
+On first startup, the watcher records all current non-draft open PR heads
+without reviewing them. New PRs and later head revisions are then reviewed.
+
+To intentionally review every currently open non-draft PR when initializing a
+new state file, use `--watch --backfill`. This can post many reviews and incur
+many inference requests, so stop the systemd service first and use it only
+deliberately.
+
+Press `Ctrl+C` to stop a foreground watcher.
+
+## 8. Install the always-on user service
+
+From the cloned repository:
+
+```bash
+install -d -m 700 "${HOME}/.config/systemd/user"
+install -d -m 700 "${HOME}/.local/state/isaaclab-review-bot"
 install -m 600 isaaclab-review-bot.service \
-  /home/kellyg/.config/systemd/user/isaaclab-review-bot.service
+  "${HOME}/.config/systemd/user/isaaclab-review-bot.service"
 
 systemctl --user unset-environment \
   GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
 systemctl --user daemon-reload
 systemctl --user enable --now isaaclab-review-bot.service
-loginctl enable-linger kellyg
-systemctl --user status isaaclab-review-bot.service
+loginctl enable-linger "${USER}"
 ```
 
-Follow its logs with:
+Check service state and follow logs:
 
 ```bash
+systemctl --user status isaaclab-review-bot.service
 journalctl --user -u isaaclab-review-bot.service -f
+```
+
+Common operations:
+
+```bash
+systemctl --user stop isaaclab-review-bot.service
+systemctl --user start isaaclab-review-bot.service
+systemctl --user restart isaaclab-review-bot.service
+systemctl --user disable --now isaaclab-review-bot.service
 ```
 
 User lingering keeps the service running after logout and starts the user
 service manager during boot. The bot cannot run while the machine is powered
 off, suspended, or disconnected from the network.
 
-On first startup, the service records current non-draft open PR heads without
-reviewing them. Later PRs and later head revisions are reviewed. To
-intentionally review the existing backlog, stop the service, remove its state
-file, and run the poller once with `--watch --backfill`.
+## Updating an installed machine
 
-The service restarts after failures, refreshes expiring App installation
-tokens, rechecks each PR head before posting, and embeds the reviewed commit SHA
-to prevent duplicate reviews after restarts.
+```bash
+cd /absolute/path/to/isaaclab-review-codex
+git pull --ff-only origin main
+uv sync
+uv run pytest
+systemctl --user restart isaaclab-review-bot.service
+```
+
+Review the diff before restarting when an update changes environment variables
+or service configuration.
+
+## Runtime behavior and recovery
+
+- The poller uses a read-only installation token while listing PRs.
+- It mints a separate repository-scoped write token only when a review must be
+  posted.
+- Installation tokens expire and are refreshed automatically.
+- State is stored at
+  `${HOME}/.local/state/isaaclab-review-bot/state.json` with mode `0600`.
+- The reviewed commit SHA is embedded in each bot review to prevent duplicate
+  reviews after ordinary restarts.
+- A PR head is rechecked immediately before posting; a result is discarded if
+  the PR changed during inference.
+- The service restarts automatically after transient failures.
+
+The process refuses to start if `GH_TOKEN`, `GITHUB_TOKEN`,
+`GH_ENTERPRISE_TOKEN`, or `GITHUB_ENTERPRISE_TOKEN` is present. GitHub activity
+is authenticated only through the `isaaclab-review-bot` App installation and
+is attributed to `isaaclab-review-bot[bot]`.
 
 ## Development
 
-Runtime code uses only the Python standard library. Install the development
-environment and run all tests with:
+This utility repository is maintained with direct pushes to `main`; do not open
+a pull request unless a maintainer explicitly asks for one.
+
+Run the validation suite before pushing:
 
 ```bash
 uv sync
 uv run pytest
 uv run ruff check .
 uv run ruff format --check .
+systemd-analyze --user verify isaaclab-review-bot.service
 ```

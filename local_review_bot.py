@@ -54,8 +54,7 @@ class BotConfiguration:
     client_id: str
     private_key_path: Path
     inference_api_key: str
-    model: str
-    fallback_model: str
+    review_models: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -159,8 +158,7 @@ def main() -> None:
             arguments.pull_request_number,
             token,
             configuration.inference_api_key,
-            model=configuration.model,
-            fallback_model=configuration.fallback_model,
+            models=configuration.review_models,
             dry_run=arguments.dry_run,
         )
         return
@@ -225,25 +223,27 @@ def _load_configuration() -> BotConfiguration:
     """Load and validate runtime configuration from environment variables."""
     repository = os.environ.get("GITHUB_REPOSITORY", _DEFAULT_REPOSITORY).strip()
     client_id = os.environ.get("ISAACLAB_REVIEW_APP_CLIENT_ID", _DEFAULT_CLIENT_ID).strip()
-    model = os.environ.get("NVIDIA_REVIEW_MODEL", automated_review._DEFAULT_MODEL).strip()
-    fallback_model = os.environ.get(
+    primary_model = os.environ.get("NVIDIA_REVIEW_MODEL", automated_review._DEFAULT_MODEL).strip()
+    ensemble_model = os.environ.get(
         "NVIDIA_REVIEW_FALLBACK_MODEL",
-        automated_review._DEFAULT_FALLBACK_MODEL,
+        automated_review._DEFAULT_ENSEMBLE_MODEL,
     ).strip()
     if repository != _DEFAULT_REPOSITORY:
         raise RuntimeError(f"This bot is locked to {_DEFAULT_REPOSITORY}, not {repository}.")
     if client_id != _DEFAULT_CLIENT_ID:
         raise RuntimeError(f"This bot is locked to GitHub App client ID {_DEFAULT_CLIENT_ID}.")
-    if not model:
-        raise RuntimeError("NVIDIA_REVIEW_MODEL must not be empty.")
+    review_models = (primary_model, ensemble_model)
+    if any(not model for model in review_models) or len(set(review_models)) != len(review_models):
+        raise RuntimeError(
+            "NVIDIA_REVIEW_MODEL and NVIDIA_REVIEW_FALLBACK_MODEL must name two distinct, non-empty models."
+        )
     private_key_path = Path(_required_env("ISAACLAB_REVIEW_APP_PRIVATE_KEY_PATH")).expanduser().resolve()
     return BotConfiguration(
         repository=repository,
         client_id=client_id,
         private_key_path=private_key_path,
         inference_api_key=_required_env("NVIDIA_INFERENCE_API_KEY"),
-        model=model,
-        fallback_model=fallback_model,
+        review_models=review_models,
     )
 
 
@@ -392,8 +392,7 @@ def _poll_once(
                 item.number,
                 write_token,
                 configuration.inference_api_key,
-                model=configuration.model,
-                fallback_model=configuration.fallback_model,
+                models=configuration.review_models,
             )
         except Exception as error:
             print(f"Review of PR #{item.number} failed: {error}", file=sys.stderr)
