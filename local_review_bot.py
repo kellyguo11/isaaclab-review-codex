@@ -101,10 +101,13 @@ class GitHubAppTokenProvider:
 
     def _mint_token(self, write: bool) -> _CachedToken:
         """Mint one repository-scoped installation token."""
+        access = "write" if write else "read-only"
+        automated_review._progress(f"Minting a short-lived {access} GitHub App installation token.")
         app_jwt = _create_app_jwt(self._client_id, self._private_key_path)
         app = _github_app_json("/app", app_jwt)
         if not isinstance(app, dict) or app.get("slug") != _EXPECTED_APP_SLUG:
             raise RuntimeError(f"Private key does not authenticate {_EXPECTED_APP_SLUG}.")
+        automated_review._progress(f"Authenticated GitHub App identity: {_EXPECTED_APP_SLUG}.")
         owner, repository_name = _split_repository(self._repository)
         installation = _github_app_json(
             f"/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repository_name, safe='')}/installation",
@@ -112,6 +115,7 @@ class GitHubAppTokenProvider:
         )
         if not isinstance(installation, dict) or not isinstance(installation.get("id"), int):
             raise RuntimeError(f"GitHub App is not installed on {self._repository}.")
+        automated_review._progress(f"Found the GitHub App installation on {self._repository}.")
 
         pull_request_access = "write" if write else "read"
         response = _github_app_json(
@@ -137,6 +141,10 @@ class GitHubAppTokenProvider:
             raise RuntimeError(f"GitHub returned unexpected installation-token permissions: {permissions}.")
 
         automated_review._verify_installation_token(self._repository, token)
+        expiration = datetime.datetime.fromtimestamp(expires_at, tz=datetime.timezone.utc).strftime(
+            "%Y-%m-%d %H:%M UTC"
+        )
+        automated_review._progress(f"GitHub App {access} token is ready; expires {expiration}.")
         return _CachedToken(value=token, expires_at=expires_at)
 
 
@@ -145,6 +153,10 @@ def main() -> None:
     arguments = _parse_arguments()
     _reject_personal_github_credentials()
     configuration = _load_configuration()
+    automated_review._progress(
+        f"Loaded review-bot configuration for {configuration.repository}; models: "
+        f"{', '.join(configuration.review_models)}."
+    )
     provider = GitHubAppTokenProvider(
         configuration.repository,
         configuration.client_id,
@@ -152,8 +164,10 @@ def main() -> None:
     )
 
     if arguments.pull_request_number is not None:
+        mode = "dry run" if arguments.dry_run else "posting review"
+        automated_review._progress(f"Starting one-shot {mode} for PR #{arguments.pull_request_number}.")
         token = provider.get_token(write=not arguments.dry_run)
-        automated_review.review_pull_request(
+        status = automated_review.review_pull_request(
             configuration.repository,
             arguments.pull_request_number,
             token,
@@ -161,6 +175,7 @@ def main() -> None:
             models=configuration.review_models,
             dry_run=arguments.dry_run,
         )
+        automated_review._progress(f"One-shot review finished with status: {status.value}.")
         return
 
     state_file = arguments.state_file or _default_state_file()
@@ -344,7 +359,7 @@ def _watch_pull_requests(
     backfill: bool,
 ) -> None:
     """Continuously poll for new non-draft pull-request revisions."""
-    print(
+    automated_review._progress(
         f"Monitoring {configuration.repository} every {poll_interval_seconds}s as the GitHub App installation. "
         f"State: {state_file}"
     )
@@ -354,9 +369,12 @@ def _watch_pull_requests(
             initialized = _poll_once(configuration, provider, state_file, backfill=backfill and first_poll)
             first_poll = False
             if initialized:
-                print("Monitor baseline initialized; future PRs and head updates will be reviewed.")
+                automated_review._progress(
+                    "Monitor baseline initialized; future PRs and head updates will be reviewed."
+                )
         except Exception as error:
-            print(f"Review-bot poll failed: {error}", file=sys.stderr)
+            automated_review._progress(f"Review-bot poll failed: {error}", error=True)
+        automated_review._progress(f"Poll complete; next poll in {poll_interval_seconds}s.")
         time.sleep(poll_interval_seconds)
 
 
@@ -371,8 +389,10 @@ def _poll_once(
     Returns:
         Whether a new state file was initialized without backfilling.
     """
+    automated_review._progress(f"Polling {configuration.repository} for open, non-draft pull requests.")
     read_token = provider.get_token(write=False)
     pull_requests = _list_open_pull_requests(configuration.repository, read_token)
+    automated_review._progress(f"GitHub returned {len(pull_requests)} open, non-draft pull requests.")
     state = _load_state(state_file, configuration.repository)
     if state is None and not backfill:
         _save_state(state_file, configuration.repository, {item.number: item.head_sha for item in pull_requests})
@@ -382,10 +402,19 @@ def _poll_once(
 
     open_numbers = {item.number for item in pull_requests}
     state = {number: head_sha for number, head_sha in state.items() if number in open_numbers}
+    unseen = [item for item in pull_requests if state.get(item.number) != item.head_sha]
+    if unseen:
+        automated_review._progress(
+            f"Detected {len(unseen)} new or updated pull-request heads: "
+            f"{', '.join(f'#{item.number}' for item in unseen)}."
+        )
+    else:
+        automated_review._progress("No new or updated pull-request heads detected.")
     for item in pull_requests:
         if state.get(item.number) == item.head_sha:
             continue
         try:
+            automated_review._progress(f"Starting automated review for PR #{item.number} at {item.head_sha[:12]}.")
             write_token = provider.get_token(write=True)
             status = automated_review.review_pull_request(
                 configuration.repository,
@@ -395,8 +424,9 @@ def _poll_once(
                 models=configuration.review_models,
             )
         except Exception as error:
-            print(f"Review of PR #{item.number} failed: {error}", file=sys.stderr)
+            automated_review._progress(f"Review of PR #{item.number} failed: {error}", error=True)
             continue
+        automated_review._progress(f"Review attempt for PR #{item.number} finished with status: {status.value}.")
         if status is not automated_review.ReviewStatus.STALE:
             state[item.number] = item.head_sha
             _save_state(state_file, configuration.repository, state)

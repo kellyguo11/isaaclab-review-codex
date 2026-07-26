@@ -46,7 +46,7 @@ def test_launcher_defaults_to_watch_and_clears_personal_github_token(tmp_path: P
 
     assert result.returncode == 0
     assert f"--directory {_LAUNCHER.parent}" in result.stdout
-    assert f"python {_LAUNCHER.parent / 'local_review_bot.py'} --watch" in result.stdout
+    assert f"python -u {_LAUNCHER.parent / 'local_review_bot.py'} --watch" in result.stdout
     assert "gh_token=unset" in result.stdout
 
 

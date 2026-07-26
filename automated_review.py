@@ -14,6 +14,7 @@ import enum
 import json
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -33,6 +34,7 @@ _MAX_FILE_CHARS = 50_000
 _MAX_REVIEW_COMMENTS = 8
 _MAX_MODEL_OUTPUT_TOKENS = 16_384
 _MAX_CONCURRENT_MODEL_REQUESTS = 3
+_PROGRESS_HEARTBEAT_SECONDS = 30
 _REQUEST_TIMEOUT_SECONDS = 600
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 _SEVERITY_ORDER = {"critical": 0, "warning": 1, "suggestion": 2}
@@ -61,6 +63,26 @@ class ReviewStatus(enum.StrEnum):
     ALREADY_REVIEWED = "already_reviewed"
     SKIPPED = "skipped"
     STALE = "stale"
+
+
+def _progress(message: str, *, error: bool = False) -> None:
+    """Print one timestamped progress message immediately."""
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {message}", file=sys.stderr if error else sys.stdout, flush=True)
+
+
+def _start_progress_heartbeat(label: str) -> threading.Event:
+    """Report periodically until the returned event is set."""
+    stop = threading.Event()
+
+    def report() -> None:
+        elapsed = _PROGRESS_HEARTBEAT_SECONDS
+        while not stop.wait(_PROGRESS_HEARTBEAT_SECONDS):
+            _progress(f"Still waiting after {elapsed}s: {label}.")
+            elapsed += _PROGRESS_HEARTBEAT_SECONDS
+
+    threading.Thread(target=report, name="review-progress", daemon=True).start()
+    return stop
 
 
 def review_pull_request(
@@ -93,30 +115,42 @@ def review_pull_request(
         raise ValueError(f"Invalid pull-request number: {pull_request_number}.")
     if len(set(models)) < 2 or any(not model for model in models):
         raise ValueError("At least two distinct, non-empty review models are required.")
+    mode = "dry run" if dry_run else "posting review"
+    _progress(f"PR #{pull_request_number}: starting {mode} with models: {', '.join(models)}.")
+    _progress(f"PR #{pull_request_number}: verifying repository-scoped GitHub App access.")
     _verify_installation_token(repository, github_token)
+    _progress(f"PR #{pull_request_number}: loading pull-request metadata.")
     pull_request = _github_json(f"/repos/{repository}/pulls/{pull_request_number}", github_token)
     if not isinstance(pull_request, dict):
         raise RuntimeError("GitHub returned an invalid pull-request payload.")
     if pull_request.get("state") != "open":
-        print(f"PR #{pull_request_number} is not open; skipping.")
+        _progress(f"PR #{pull_request_number} is not open; skipping.")
         return ReviewStatus.SKIPPED
     if pull_request.get("draft"):
-        print(f"PR #{pull_request_number} is a draft; skipping until it is ready for review.")
+        _progress(f"PR #{pull_request_number} is a draft; skipping until it is ready for review.")
         return ReviewStatus.SKIPPED
 
     head_sha = _nested_string(pull_request, "head", "sha")
+    _progress(f"PR #{pull_request_number}: reviewing head {head_sha[:12]}.")
     marker = f"<!-- {_MARKER_PREFIX}{head_sha} -->"
-    if not dry_run and _has_existing_review(repository, pull_request_number, marker, github_token):
-        print(f"PR #{pull_request_number} at {head_sha[:12]} was already reviewed; skipping.")
-        return ReviewStatus.ALREADY_REVIEWED
+    if not dry_run:
+        _progress(f"PR #{pull_request_number}: checking for an existing bot review of this head.")
+        if _has_existing_review(repository, pull_request_number, marker, github_token):
+            _progress(f"PR #{pull_request_number} at {head_sha[:12]} was already reviewed; skipping.")
+            return ReviewStatus.ALREADY_REVIEWED
 
+    _progress(f"PR #{pull_request_number}: fetching changed files.")
     changed_files = _github_paginate(f"/repos/{repository}/pulls/{pull_request_number}/files", github_token)
     if not changed_files:
-        print(f"PR #{pull_request_number} has no changed files; skipping.")
+        _progress(f"PR #{pull_request_number} has no changed files; skipping.")
         return ReviewStatus.SKIPPED
 
+    _progress(f"PR #{pull_request_number}: building review context from {len(changed_files)} changed files.")
     review_input = _build_review_input(repository, pull_request, changed_files, github_token)
+    truncation = " (truncated to the context budget)" if review_input.truncated else ""
+    _progress(f"PR #{pull_request_number}: context ready, {len(review_input.serialized):,} characters{truncation}.")
     specialist_results = _run_specialist_reviews(review_input.serialized, models, inference_api_key)
+    _progress(f"PR #{pull_request_number}: aggregating {len(specialist_results)} successful specialist results.")
     aggregated = _aggregate_reviews(
         review_input.serialized,
         specialist_results,
@@ -124,11 +158,15 @@ def review_pull_request(
         inference_api_key,
     )
     findings = _validate_findings(aggregated.get("findings"), review_input.valid_lines)
+    _progress(f"PR #{pull_request_number}: aggregation produced {len(findings)} validated inline findings.")
     body = _build_review_body(aggregated, findings, marker, review_input.truncated, preview=dry_run)
+    _progress(f"PR #{pull_request_number}: rechecking the head commit before publishing.")
     latest_pull_request = _github_json(f"/repos/{repository}/pulls/{pull_request_number}", github_token)
     if not isinstance(latest_pull_request, dict) or _nested_string(latest_pull_request, "head", "sha") != head_sha:
-        print(f"PR #{pull_request_number} changed while it was being reviewed; skipping the stale result.")
+        _progress(f"PR #{pull_request_number} changed while it was being reviewed; skipping the stale result.")
         return ReviewStatus.STALE
+    action = "printing the dry-run preview" if dry_run else "posting a comment-only GitHub review"
+    _progress(f"PR #{pull_request_number}: {action}.")
     return _publish_or_preview(
         repository,
         pull_request_number,
@@ -149,7 +187,7 @@ def _verify_installation_token(repository: str, token: str) -> None:
             "The GitHub credential is not an installation token scoped only to "
             f"{repository}; accessible repositories: {sorted(accessible_repositories)}."
         )
-    print(f"Verified repository-scoped GitHub App installation access to {repository}.")
+    _progress(f"Verified repository-scoped GitHub App installation access to {repository}.")
 
 
 def _github_json(
@@ -441,12 +479,16 @@ def _run_specialist_reviews(
     }
     results: list[dict[str, Any]] = []
     request_count = len(roles) * len(models)
+    _progress(
+        f"Starting {request_count} specialist requests across {len(models)} models "
+        f"(up to {_MAX_CONCURRENT_MODEL_REQUESTS} concurrent)."
+    )
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=min(_MAX_CONCURRENT_MODEL_REQUESTS, request_count)
     ) as executor:
         futures = {
             executor.submit(
-                _run_review_pass,
+                _run_review_pass_with_progress,
                 role_name,
                 instructions,
                 review_input,
@@ -461,7 +503,7 @@ def _run_specialist_reviews(
             try:
                 result = future.result()
             except Exception as error:
-                print(f"Warning: {role_name} review pass with {model} failed: {error}", file=sys.stderr)
+                _progress(f"Warning: {role_name} review pass with {model} failed: {error}", error=True)
                 continue
             result["review_pass"] = role_name
             result["model"] = model
@@ -471,8 +513,37 @@ def _run_specialist_reviews(
     successful_models = {str(result.get("model")) for result in results}
     missing_models = sorted(set(models) - successful_models)
     if missing_models:
-        print(f"Warning: no specialist review succeeded for models: {', '.join(missing_models)}.", file=sys.stderr)
+        _progress(
+            f"Warning: no specialist review succeeded for models: {', '.join(missing_models)}.",
+            error=True,
+        )
+    _progress(f"Specialist stage complete: {len(results)} of {request_count} requests succeeded.")
     return results
+
+
+def _run_review_pass_with_progress(
+    role_name: str,
+    role_instructions: str,
+    review_input: str,
+    model: str,
+    api_key: str,
+) -> dict[str, Any]:
+    """Run one specialist pass with start, completion, and duration messages."""
+    started_at = time.monotonic()
+    label = f"specialist {role_name} with {model}"
+    _progress(f"Specialist started: {role_name} with {model}.")
+    heartbeat = _start_progress_heartbeat(label)
+    try:
+        result = _run_review_pass(role_name, role_instructions, review_input, model, api_key)
+    except Exception:
+        elapsed = time.monotonic() - started_at
+        _progress(f"Specialist failed after {elapsed:.1f}s: {role_name} with {model}.", error=True)
+        raise
+    finally:
+        heartbeat.set()
+    elapsed = time.monotonic() - started_at
+    _progress(f"Specialist completed in {elapsed:.1f}s: {role_name} with {model}.")
+    return result
 
 
 def _run_review_pass(
@@ -555,11 +626,24 @@ def _request_aggregate_completion(
     """Aggregate ensemble results, trying each model in configured order."""
     failures: list[str] = []
     for model in models:
+        started_at = time.monotonic()
+        _progress(f"Aggregation started with {model}.")
+        heartbeat = _start_progress_heartbeat(f"aggregation with {model}")
         try:
-            return _request_model_completion(model, system_prompt, user_input, output_schema, api_key)
+            result = _request_model_completion(model, system_prompt, user_input, output_schema, api_key)
         except Exception as error:
+            elapsed = time.monotonic() - started_at
             failures.append(f"{model}: {error}")
-            print(f"Warning: aggregation with NVIDIA inference model {model} failed: {error}", file=sys.stderr)
+            _progress(
+                f"Warning: aggregation with {model} failed after {elapsed:.1f}s: {error}",
+                error=True,
+            )
+            continue
+        finally:
+            heartbeat.set()
+        elapsed = time.monotonic() - started_at
+        _progress(f"Aggregation completed in {elapsed:.1f}s with {model}.")
+        return result
     raise RuntimeError(f"NVIDIA inference failed for every configured model: {'; '.join(failures)}")
 
 
@@ -793,12 +877,12 @@ def _publish_or_preview(
 ) -> ReviewStatus:
     """Print a dry-run preview or post the review through the GitHub App."""
     if dry_run:
-        print(f"\n--- Proposed review for {repository}#{pull_request_number} at {head_sha[:12]} ---\n")
-        print(body)
+        print(f"\n--- Proposed review for {repository}#{pull_request_number} at {head_sha[:12]} ---\n", flush=True)
+        print(body, flush=True)
         for comment in _build_inline_comments(findings):
-            print(f"\n--- Proposed inline comment at {comment['path']}:{comment['line']} ---\n")
-            print(comment["body"])
-        print("\nDry run complete; no GitHub review was posted.")
+            print(f"\n--- Proposed inline comment at {comment['path']}:{comment['line']} ---\n", flush=True)
+            print(comment["body"], flush=True)
+        _progress("Dry run complete; no GitHub review was posted.")
         return ReviewStatus.PREVIEWED
 
     response = _post_review(
@@ -810,7 +894,7 @@ def _publish_or_preview(
         github_token,
     )
     review_id = response.get("id") if isinstance(response, dict) else None
-    print(f"Posted review {review_id or '<unknown>'} for PR #{pull_request_number} at {head_sha[:12]}.")
+    _progress(f"Posted review {review_id or '<unknown>'} for PR #{pull_request_number} at {head_sha[:12]}.")
     return ReviewStatus.POSTED
 
 

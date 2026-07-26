@@ -182,6 +182,10 @@ cd /absolute/path/to/isaaclab-review-codex
 
 On first startup, the watcher records all current non-draft open PR heads
 without reviewing them. New PRs and later head revisions are then reviewed.
+The bot prints timestamped progress for every poll, GitHub authentication step,
+specialist model request, aggregation request, and posting attempt. Model calls
+can take several minutes; the bot prints a waiting heartbeat every 30 seconds
+and completion messages include elapsed time.
 
 To intentionally review every currently open non-draft PR when initializing a
 new state file, use `./launch_review_bot.sh --watch --backfill`. This can post

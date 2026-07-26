@@ -40,4 +40,4 @@ if (( $# == 0 )); then
     set -- --watch
 fi
 
-exec uv --directory "${SCRIPT_DIR}" run --no-project python "${SCRIPT_DIR}/local_review_bot.py" "$@"
+exec uv --directory "${SCRIPT_DIR}" run --no-project python -u "${SCRIPT_DIR}/local_review_bot.py" "$@"
