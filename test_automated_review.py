@@ -47,6 +47,64 @@ def test_changed_right_lines_tracks_additions_across_hunks() -> None:
     assert reviewer._format_line_ranges({11, 12, 31}) == "11-12,31"
 
 
+def test_fair_text_budget_preserves_short_entries_before_splitting() -> None:
+    """Short patches should remain complete while large patches share the remainder."""
+    reviewer = _load_review_module()
+
+    assert reviewer._allocate_fair_text_budgets([10, 100, 100], 110) == [10, 50, 50]
+    assert reviewer._allocate_fair_text_budgets([10, 20], 100) == [10, 20]
+    assert reviewer._allocate_fair_text_budgets([10, 20], 0) == [0, 0]
+
+
+def test_changed_file_excerpt_includes_late_changed_regions() -> None:
+    """Current-file context should follow changed lines instead of taking a file prefix."""
+    reviewer = _load_review_module()
+    current_file = "\n".join(f"line {line}" for line in range(1, 151))
+
+    excerpt = reviewer._changed_file_excerpt(current_file, {90, 140})
+
+    assert "90: line 90" in excerpt
+    assert "140: line 140" in excerpt
+    assert "\n1: line 1\n" not in excerpt
+    assert "[current file lines 50-150]" in excerpt
+
+
+def test_review_context_preserves_complete_patch_and_changed_line_excerpts(monkeypatch) -> None:
+    """The context builder should keep the full diff and sample current code at changed lines."""
+    reviewer = _load_review_module()
+    patch = "@@ -89,1 +90,1 @@\n-old value\n+new value\n"
+    current_file = "\n".join(f"line {line}" if line != 90 else "new value" for line in range(1, 151))
+    pull_request = {
+        "number": 10,
+        "title": "Change late code",
+        "body": "",
+        "user": {"login": "author"},
+        "base": {"ref": "develop", "sha": "base-sha"},
+        "head": {"ref": "feature", "sha": "head-sha"},
+    }
+    changed_files = [
+        {
+            "filename": "source/example.py",
+            "status": "modified",
+            "additions": 1,
+            "deletions": 1,
+            "patch": patch,
+            "raw_url": "https://raw.githubusercontent.com/example/repo/head/source/example.py",
+        }
+    ]
+    monkeypatch.setattr(reviewer, "_fetch_repository_file", lambda *args: "Trusted instructions")
+    monkeypatch.setattr(reviewer, "_fetch_raw_file", lambda url: (current_file, False))
+
+    review_input = reviewer._build_review_input("example/repo", pull_request, changed_files, "token")
+    serialized = json.loads(review_input.serialized)
+
+    assert serialized["files"][0]["patch"] == patch
+    assert "90: new value" in serialized["files"][0]["current_file"]
+    assert serialized["patches_truncated"] is False
+    assert review_input.patches_truncated is False
+    assert len(review_input.serialized) <= reviewer._MAX_CONTEXT_CHARS
+
+
 def test_validate_findings_filters_invalid_locations_and_duplicates() -> None:
     """Only unique findings on added lines should be accepted."""
     reviewer = _load_review_module()
@@ -256,7 +314,8 @@ def test_specialist_prompt_defaults_to_no_speculative_findings(monkeypatch) -> N
     prompt = captured["system_prompt"]
     assert "The correct default is zero findings" in prompt
     assert "Do not report hypothetical edge cases" in prompt
-    assert "reasonable maintainers could disagree" in prompt
+    assert "runtime reproduction is not required" in prompt
+    assert "incompatible change to an existing public type" in prompt
     assert "Return every finding that satisfies this high bar" in prompt
     assert "do not add filler" in prompt
 
@@ -286,6 +345,7 @@ def test_aggregation_prompt_rejects_subjective_and_test_only_findings(monkeypatc
     assert "Specialist repetition is not proof" in prompt
     assert "Never turn a test-coverage observation" in prompt
     assert "into an inline finding" in prompt
+    assert "deterministic compatibility or type-contract failure" in prompt
     assert "When uncertain, output no findings" in prompt
 
 
@@ -354,6 +414,7 @@ def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -
     assert captured["api_key"] == "nvidia-key"
     assert "really needs" in captured["system_prompt"]
     assert "fixing" in captured["system_prompt"]
+    assert "valid evidence without a runtime reproduction" in captured["system_prompt"]
     assert "Never create a new finding" in captured["system_prompt"]
     assert captured["output_schema"] == reviewer._critic_schema()
     critic_input = json.loads(captured["user_input"])

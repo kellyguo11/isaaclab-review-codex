@@ -23,12 +23,21 @@ verification fails with both models, nothing is posted.
 Each request allows up to 65,536 output tokens so reasoning models have enough
 budget to produce their final structured answer.
 
+Review context is capped at 2,100,000 characters, increased from the original
+480,000-character budget. This leaves tokenizer headroom inside the configured
+models' one-million-token input windows. The allocator preserves the complete PR
+diff before using the remaining space for line-numbered current-file excerpts
+around every changed region. If only supplemental context is limited, the
+review explicitly states that the full diff was still reviewed.
+
 The review policy prioritizes precision over recall. It reports every finding
 that clears the high-confidence threshold, with no numerical cap, and rejects
 hypothetical edge cases, missing-test observations, logging preferences,
 optional hardening, alternative designs, formatting, and other subjective style
 feedback. Every finding must demonstrate a concrete design, architecture, API,
-or maintainability impact from an added line in the PR.
+or maintainability impact from an added line in the PR. Deterministic contract,
+type, and producer/consumer failures do not require a runtime reproduction or a
+specific external caller to be reported.
 
 The bot calls NVIDIA's OpenAI-compatible
 `https://inference-api.nvidia.com/v1/chat/completions` endpoint directly. It
