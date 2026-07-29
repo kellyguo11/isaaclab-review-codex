@@ -14,17 +14,21 @@ Every pull request is reviewed by a two-model ensemble:
 Each model independently runs three specialist passes: design and architecture,
 API contracts, and implementation quality. Opus 5 then conservatively
 aggregates all six results into one review; GPT-5.6 Sol handles aggregation if
-Opus is unavailable. A normal review therefore makes seven NVIDIA inference
-requests.
+Opus is unavailable. Before publication, GPT-5.6 Sol independently checks every
+candidate issue against the diff and rejects anything that does not clearly
+need fixing; Opus handles this verification if GPT is unavailable. The verifier
+can accept or reject existing candidate IDs but cannot invent or relocate
+findings. A normal review therefore makes eight NVIDIA inference requests. If
+verification fails with both models, nothing is posted.
 Each request allows up to 65,536 output tokens so reasoning models have enough
 budget to produce their final structured answer.
 
-The review policy prioritizes precision over recall. It reports no more than
-three concise, high-confidence findings and rejects hypothetical edge cases,
-missing-test observations, logging preferences, optional hardening, alternative
-designs, formatting, and other subjective style feedback. Every finding must
-demonstrate a concrete design, architecture, API, or maintainability impact from
-an added line in the PR.
+The review policy prioritizes precision over recall. It reports every finding
+that clears the high-confidence threshold, with no numerical cap, and rejects
+hypothetical edge cases, missing-test observations, logging preferences,
+optional hardening, alternative designs, formatting, and other subjective style
+feedback. Every finding must demonstrate a concrete design, architecture, API,
+or maintainability impact from an added line in the PR.
 
 The bot calls NVIDIA's OpenAI-compatible
 `https://inference-api.nvidia.com/v1/chat/completions` endpoint directly. It
@@ -112,7 +116,7 @@ NVIDIA_REVIEW_FALLBACK_MODEL=azure/openai/gpt-5.6-sol
 
 Despite its legacy name, `NVIDIA_REVIEW_FALLBACK_MODEL` is always used as the
 second ensemble reviewer. It is also the fallback for final aggregation when
-the primary model fails.
+the primary model fails and the first-choice pre-publication verifier.
 
 Do not put quotes around values unless a path contains spaces. Do not commit
 this environment file or paste either private key into an issue, pull request,
@@ -164,7 +168,7 @@ unset NVIDIA_INFERENCE_API_KEY
 
 ## 5. Run a safe dry run
 
-A dry run reads one non-draft PR, runs the full seven-request ensemble, and
+A dry run reads one non-draft PR, runs the full eight-request ensemble, and
 prints the proposed review. It requests a read-only GitHub App token and cannot
 post:
 
@@ -202,9 +206,9 @@ without reviewing them. Each later PR is reviewed once when it first becomes
 open and ready for review. New commits and force-pushes on a known PR do not
 trigger automatic full reviews.
 The bot prints timestamped progress for every poll, GitHub authentication step,
-specialist model request, aggregation request, and posting attempt. Model calls
-can take several minutes; the bot prints a waiting heartbeat every 30 seconds
-and completion messages include elapsed time.
+specialist model request, aggregation request, verification request, and posting
+attempt. Model calls can take several minutes; the bot prints a waiting
+heartbeat every 30 seconds and completion messages include elapsed time.
 
 To intentionally review every currently open non-draft PR when initializing a
 new state file, use `./launch_review_bot.sh --watch --backfill`. This can post

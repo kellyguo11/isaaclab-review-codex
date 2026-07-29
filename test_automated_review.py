@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -100,6 +101,27 @@ def test_validate_findings_filters_invalid_locations_and_duplicates() -> None:
     validated = reviewer._validate_findings(findings, {"source/example.py": {8, 10}})
 
     assert validated == [findings[0]]
+
+
+def test_validate_findings_has_no_numeric_cap() -> None:
+    """Every high-confidence finding on a distinct added line should survive."""
+    reviewer = _load_review_module()
+    findings = [
+        {
+            "path": "source/example.py",
+            "line": line,
+            "category": "implementation",
+            "severity": "warning",
+            "title": f"Issue {line}",
+            "body": f"Added line {line} introduces a demonstrated issue.",
+            "suggestion": "",
+        }
+        for line in range(1, 6)
+    ]
+
+    validated = reviewer._validate_findings(findings, {"source/example.py": set(range(1, 6))})
+
+    assert validated == findings
 
 
 def test_extract_chat_completion_output_parses_json_content() -> None:
@@ -235,7 +257,8 @@ def test_specialist_prompt_defaults_to_no_speculative_findings(monkeypatch) -> N
     assert "The correct default is zero findings" in prompt
     assert "Do not report hypothetical edge cases" in prompt
     assert "reasonable maintainers could disagree" in prompt
-    assert "Return at most three findings" in prompt
+    assert "Return every finding that satisfies this high bar" in prompt
+    assert "do not add filler" in prompt
 
 
 def test_aggregation_prompt_rejects_subjective_and_test_only_findings(monkeypatch) -> None:
@@ -264,6 +287,96 @@ def test_aggregation_prompt_rejects_subjective_and_test_only_findings(monkeypatc
     assert "Never turn a test-coverage observation" in prompt
     assert "into an inline finding" in prompt
     assert "When uncertain, output no findings" in prompt
+
+
+def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -> None:
+    """The critic should use the other model first and be unable to invent findings."""
+    reviewer = _load_review_module()
+    captured = {}
+    candidates = [
+        {
+            "path": "source/example.py",
+            "line": 8,
+            "category": "api",
+            "severity": "warning",
+            "title": "Breaks the public contract",
+            "body": "The changed return type breaks existing callers.",
+            "suggestion": "",
+        },
+        {
+            "path": "source/example.py",
+            "line": 12,
+            "category": "implementation",
+            "severity": "suggestion",
+            "title": "Optional cleanup",
+            "body": "This could use a different helper.",
+            "suggestion": "",
+        },
+    ]
+    candidate_review = {
+        "summary": "Two concerns.",
+        "design_architecture": "No material concerns.",
+        "api_assessment": "One API concern.",
+        "implementation_assessment": "One implementation concern.",
+        "verdict": "Minor fixes needed",
+        "findings": candidates,
+    }
+
+    def fake_verification(models, system_prompt, user_input, output_schema, api_key):
+        captured.update(
+            {
+                "models": models,
+                "system_prompt": system_prompt,
+                "user_input": user_input,
+                "output_schema": output_schema,
+                "api_key": api_key,
+            }
+        )
+        return {
+            "summary": "One demonstrated API concern.",
+            "design_architecture": "No material concerns.",
+            "api_assessment": "The return contract is broken.",
+            "implementation_assessment": "No material concerns.",
+            "verdict": "Minor fixes needed",
+            "accepted_finding_ids": [0, 99, 0],
+        }
+
+    monkeypatch.setattr(reviewer, "_request_verification_completion", fake_verification)
+
+    verified = reviewer._review_candidate_review(
+        '{"pull_request":{},"files":[]}',
+        candidate_review,
+        ("opus-model", "gpt-model"),
+        "nvidia-key",
+    )
+
+    assert captured["models"] == ("gpt-model", "opus-model")
+    assert captured["api_key"] == "nvidia-key"
+    assert "really needs" in captured["system_prompt"]
+    assert "fixing" in captured["system_prompt"]
+    assert "Never create a new finding" in captured["system_prompt"]
+    assert captured["output_schema"] == reviewer._critic_schema()
+    critic_input = json.loads(captured["user_input"])
+    assert [finding["candidate_id"] for finding in critic_input["CANDIDATE_REVIEW"]["findings"]] == [0, 1]
+    assert verified["findings"] == [candidates[0]]
+
+
+def test_prepublication_critic_fails_closed(monkeypatch) -> None:
+    """A review should not bypass verification when every verifier fails."""
+    reviewer = _load_review_module()
+
+    def fail_verification(*args, **kwargs):
+        raise RuntimeError("all verification models failed")
+
+    monkeypatch.setattr(reviewer, "_request_verification_completion", fail_verification)
+
+    with pytest.raises(RuntimeError, match="all verification models failed"):
+        reviewer._review_candidate_review(
+            '{"pull_request":{},"files":[]}',
+            {"findings": []},
+            ("opus-model", "gpt-model"),
+            "nvidia-key",
+        )
 
 
 def test_existing_review_requires_bot_login_and_matching_sha(monkeypatch) -> None:
