@@ -37,7 +37,8 @@ optional hardening, alternative designs, formatting, and other subjective style
 feedback. Every finding must demonstrate a concrete design, architecture, API,
 or maintainability impact from an added line in the PR. Deterministic contract,
 type, and producer/consumer failures do not require a runtime reproduction or a
-specific external caller to be reported.
+specific external caller to be reported. The bot posts concise explanatory
+comments and does not generate GitHub replacement-code suggestion blocks.
 
 The bot calls NVIDIA's OpenAI-compatible
 `https://inference-api.nvidia.com/v1/chat/completions` endpoint directly. It

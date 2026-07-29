@@ -586,19 +586,26 @@ def _run_specialist_reviews(
         "design_architecture": (
             "Review structural decisions introduced by the diff: responsibility and state ownership, abstraction and "
             "module boundaries, dependency direction, lifecycle integration, reuse of existing architecture, and "
-            "cross-package effects. Flag only a concrete architectural inconsistency with demonstrated impact; do not "
-            "prefer a different design merely because it is possible."
+            "cross-package effects. For backend implementations of shared APIs, verify that backend ordering, sign, "
+            "coordinate-basis, and cache-lifecycle details are transformed at the backend boundary rather than leaking "
+            "into the common contract. Flag only a concrete architectural inconsistency with demonstrated impact; do "
+            "not prefer a different design merely because it is possible."
         ),
         "api_contract": (
             "Review public and extension-facing contracts introduced or changed by the diff: API compatibility and "
             "deprecation, naming and discoverability, configuration and CLI behavior, type and shape contracts, units, "
-            "defaults, exports, and caller migration. Flag only a directly evidenced contract break or repository-rule "
-            "violation."
+            "defaults, exports, and caller migration. Compare both annotations and actual runtime value types before and "
+            "after the change. An internal zero-copy wrapper escaping through an existing public property or return value "
+            "is a compatibility change even when related new APIs are opt-in. Flag only a directly evidenced contract "
+            "break or repository-rule violation."
         ),
         "implementation_quality": (
             "Review whether the implementation follows trusted repository instructions and established adjacent code "
             "patterns. Focus on clear control flow, appropriate reuse, maintainable complexity, and consistent public "
-            "implementation style. Ignore formatting, lint, optional refactors, test coverage, and personal style."
+            "implementation style. Trace selector wrapper values through every changed producer and consumer. For "
+            "timestamped data, trace each state or property write through both source buffers and derived caches; "
+            "invalidating a derived value is insufficient when its recomputation reads a still-fresh stale source. "
+            "Ignore formatting, lint, optional refactors, test coverage, and personal style."
         ),
     }
     results: list[dict[str, Any]] = []
@@ -696,7 +703,7 @@ Review rules:
 - Trace the relevant path across all supplied files and current-file excerpts. Do not invent code that is not present.
 - Findings must reference a path and line listed in that file's valid_added_line_ranges.
 - Explain the demonstrated impact and the smallest appropriate fix. Keep the title under 10 words and the body under
-  80 words. Use an empty suggestion unless an exact replacement is clearly correct.
+  80 words. Always use an empty suggestion; the bot does not post generated replacement-code blocks.
 - Do not report hypothetical edge cases, possible future problems, missing tests, logging preferences, optional
   hardening, alternative designs, formatting, praise, or issues in unchanged code.
 - Do not infer undocumented requirements or platform constraints. An incompatible change to an existing public type,
@@ -739,6 +746,14 @@ A final finding is allowed only when all of these are true:
    deterministic behavior, changed producer/consumer path, or trusted rule.
 3. It has a concrete API, architectural, user, or long-term maintenance impact.
 4. The proposed correction is specific and proportionate.
+
+Before accepting a no-finding result, explicitly check these common cross-cutting contracts when they are touched:
+- Existing public properties and returns must retain their runtime types unless the change follows the trusted
+  deprecation policy; a new opt-in wrapper API does not authorize changing a separate legacy property.
+- Shared articulation dynamics must use the same public ordering, sign, and coordinate basis across backends, including
+  Jacobians, mass matrices, generalized forces, and reversed joint orientations.
+- Same-timestamp writes must invalidate every stale source and derived cache used by the next read.
+- Finder or selector wrapper values must remain accepted through every changed consumer boundary.
 
 Specialist repetition is not proof. Independently validate each claim and discard it when evidence is incomplete,
 subjective, speculative, test-only, style-only, or merely an alternative design. Never turn a test-coverage observation
@@ -1066,7 +1081,7 @@ def _finding_schema() -> dict[str, Any]:
             "severity": {"type": "string", "enum": ["critical", "warning", "suggestion"]},
             "title": {"type": "string"},
             "body": {"type": "string"},
-            "suggestion": {"type": "string"},
+            "suggestion": {"type": "string", "const": ""},
         },
         "required": ["path", "line", "category", "severity", "title", "body", "suggestion"],
         "additionalProperties": False,
@@ -1148,7 +1163,6 @@ def _validate_findings(findings: Any, valid_lines: dict[str, set[int]]) -> list[
         severity = finding.get("severity")
         title = _clean_text(finding.get("title"), 160)
         body = _clean_text(finding.get("body"), 1_000)
-        suggestion = _clean_text(finding.get("suggestion"), 1_000)
         if not isinstance(path, str) or not isinstance(line, int) or isinstance(line, bool):
             continue
         if category not in _FINDING_CATEGORIES:
@@ -1166,7 +1180,7 @@ def _validate_findings(findings: Any, valid_lines: dict[str, set[int]]) -> list[
                 "severity": severity,
                 "title": title,
                 "body": body,
-                "suggestion": suggestion,
+                "suggestion": "",
             }
         )
     validated.sort(key=lambda finding: (_SEVERITY_ORDER[finding["severity"]], finding["path"], finding["line"]))
@@ -1280,8 +1294,6 @@ def _build_inline_comments(findings: list[dict[str, Any]]) -> list[dict[str, Any
         label = _SEVERITY_LABELS[finding["severity"]]
         category = str(finding["category"]).replace("_", " ").title()
         comment_body = f"{label} · {category} — **{finding['title']}**\n\n{finding['body']}"
-        if finding["suggestion"]:
-            comment_body += f"\n\n```suggestion\n{finding['suggestion']}\n```"
         comments.append(
             {
                 "path": finding["path"],

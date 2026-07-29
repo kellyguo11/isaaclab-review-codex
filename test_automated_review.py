@@ -158,7 +158,7 @@ def test_validate_findings_filters_invalid_locations_and_duplicates() -> None:
 
     validated = reviewer._validate_findings(findings, {"source/example.py": {8, 10}})
 
-    assert validated == [findings[0]]
+    assert validated == [{**findings[0], "suggestion": ""}]
 
 
 def test_validate_findings_has_no_numeric_cap() -> None:
@@ -272,7 +272,7 @@ def test_specialist_ensemble_runs_every_role_on_every_model(monkeypatch) -> None
     calls = []
 
     def fake_review_pass(role_name, role_instructions, review_input, model, api_key):
-        calls.append((role_name, model, review_input, api_key))
+        calls.append((role_name, role_instructions, model, review_input, api_key))
         return {"summary": f"{role_name} from {model}", "findings": []}
 
     monkeypatch.setattr(reviewer, "_run_review_pass", fake_review_pass)
@@ -280,11 +280,15 @@ def test_specialist_ensemble_runs_every_role_on_every_model(monkeypatch) -> None
     results = reviewer._run_specialist_reviews("review-input", ("opus-model", "gpt-model"), "nvidia-key")
 
     assert len(results) == 6
-    assert {(role, model) for role, model, _, _ in calls} == {
+    assert {(role, model) for role, _, model, _, _ in calls} == {
         (role, model)
         for role in ("design_architecture", "api_contract", "implementation_quality")
         for model in ("opus-model", "gpt-model")
     }
+    instructions = {role: role_instructions for role, role_instructions, _, _, _ in calls}
+    assert "coordinate-basis" in instructions["design_architecture"]
+    assert "internal zero-copy wrapper escaping" in instructions["api_contract"]
+    assert "still-fresh stale source" in instructions["implementation_quality"]
     assert {(result["review_pass"], result["model"]) for result in results} == {
         (role, model)
         for role in ("design_architecture", "api_contract", "implementation_quality")
@@ -316,6 +320,7 @@ def test_specialist_prompt_defaults_to_no_speculative_findings(monkeypatch) -> N
     assert "Do not report hypothetical edge cases" in prompt
     assert "runtime reproduction is not required" in prompt
     assert "incompatible change to an existing public type" in prompt
+    assert "Always use an empty suggestion" in prompt
     assert "Return every finding that satisfies this high bar" in prompt
     assert "do not add filler" in prompt
 
@@ -346,6 +351,8 @@ def test_aggregation_prompt_rejects_subjective_and_test_only_findings(monkeypatc
     assert "Never turn a test-coverage observation" in prompt
     assert "into an inline finding" in prompt
     assert "deterministic compatibility or type-contract failure" in prompt
+    assert "new opt-in wrapper API" in prompt
+    assert "Same-timestamp writes" in prompt
     assert "When uncertain, output no findings" in prompt
 
 
@@ -516,11 +523,7 @@ def test_post_review_always_uses_comment_event(monkeypatch) -> None:
             "path": "source/example.py",
             "line": 8,
             "side": "RIGHT",
-            "body": (
-                "🔴 Critical · Implementation — **Incorrect reset**\n\n"
-                "This retains state from the prior episode.\n\n"
-                "```suggestion\nstate[env_ids] = 0\n```"
-            ),
+            "body": "🔴 Critical · Implementation — **Incorrect reset**\n\nThis retains state from the prior episode.",
         }
     ]
 
