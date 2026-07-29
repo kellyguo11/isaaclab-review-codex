@@ -11,12 +11,20 @@ Every pull request is reviewed by a two-model ensemble:
 - `azure/anthropic/claude-opus-5`
 - `azure/openai/gpt-5.6-sol`
 
-Each model independently runs three specialist passes: Isaac Lab correctness,
-silent-failure analysis, and test analysis. Opus 5 then aggregates all six
-results into one review; GPT-5.6 Sol handles aggregation if Opus is unavailable.
-A normal review therefore makes seven NVIDIA inference requests.
+Each model independently runs three specialist passes: design and architecture,
+API contracts, and implementation quality. Opus 5 then conservatively
+aggregates all six results into one review; GPT-5.6 Sol handles aggregation if
+Opus is unavailable. A normal review therefore makes seven NVIDIA inference
+requests.
 Each request allows up to 65,536 output tokens so reasoning models have enough
 budget to produce their final structured answer.
+
+The review policy prioritizes precision over recall. It reports no more than
+three concise, high-confidence findings and rejects hypothetical edge cases,
+missing-test observations, logging preferences, optional hardening, alternative
+designs, formatting, and other subjective style feedback. Every finding must
+demonstrate a concrete design, architecture, API, or maintainability impact from
+an added line in the PR.
 
 The bot calls NVIDIA's OpenAI-compatible
 `https://inference-api.nvidia.com/v1/chat/completions` endpoint directly. It

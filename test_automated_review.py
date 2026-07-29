@@ -53,6 +53,7 @@ def test_validate_findings_filters_invalid_locations_and_duplicates() -> None:
         {
             "path": "source/example.py",
             "line": 8,
+            "category": "implementation",
             "severity": "warning",
             "title": "Real issue",
             "body": "The reset path leaves stale state.",
@@ -61,6 +62,7 @@ def test_validate_findings_filters_invalid_locations_and_duplicates() -> None:
         {
             "path": "source/example.py",
             "line": 8,
+            "category": "implementation",
             "severity": "critical",
             "title": "Duplicate",
             "body": "Duplicate location.",
@@ -69,6 +71,7 @@ def test_validate_findings_filters_invalid_locations_and_duplicates() -> None:
         {
             "path": "source/example.py",
             "line": 9,
+            "category": "implementation",
             "severity": "warning",
             "title": "Context line",
             "body": "This line was not added.",
@@ -77,14 +80,24 @@ def test_validate_findings_filters_invalid_locations_and_duplicates() -> None:
         {
             "path": "source/other.py",
             "line": 8,
+            "category": "implementation",
             "severity": "warning",
             "title": "Wrong file",
             "body": "The file was not changed.",
             "suggestion": "",
         },
+        {
+            "path": "source/example.py",
+            "line": 10,
+            "category": "test_coverage",
+            "severity": "suggestion",
+            "title": "Missing test",
+            "body": "This needs another test.",
+            "suggestion": "",
+        },
     ]
 
-    validated = reviewer._validate_findings(findings, {"source/example.py": {8}})
+    validated = reviewer._validate_findings(findings, {"source/example.py": {8, 10}})
 
     assert validated == [findings[0]]
 
@@ -189,14 +202,68 @@ def test_specialist_ensemble_runs_every_role_on_every_model(monkeypatch) -> None
     assert len(results) == 6
     assert {(role, model) for role, model, _, _ in calls} == {
         (role, model)
-        for role in ("isaaclab_correctness", "silent_failure_hunter", "test_analyzer")
+        for role in ("design_architecture", "api_contract", "implementation_quality")
         for model in ("opus-model", "gpt-model")
     }
     assert {(result["review_pass"], result["model"]) for result in results} == {
         (role, model)
-        for role in ("isaaclab_correctness", "silent_failure_hunter", "test_analyzer")
+        for role in ("design_architecture", "api_contract", "implementation_quality")
         for model in ("opus-model", "gpt-model")
     }
+
+
+def test_specialist_prompt_defaults_to_no_speculative_findings(monkeypatch) -> None:
+    """The review prompt should explicitly favor precision over hypothetical concerns."""
+    reviewer = _load_review_module()
+    captured = {}
+
+    def fake_completion(model, system_prompt, user_input, output_schema, api_key):
+        captured["system_prompt"] = system_prompt
+        return {"summary": "No findings.", "findings": []}
+
+    monkeypatch.setattr(reviewer, "_request_model_completion", fake_completion)
+
+    reviewer._run_review_pass(
+        "design_architecture",
+        "Review architecture.",
+        '{"pull_request":{}}',
+        "model",
+        "key",
+    )
+
+    prompt = captured["system_prompt"]
+    assert "The correct default is zero findings" in prompt
+    assert "Do not report hypothetical edge cases" in prompt
+    assert "reasonable maintainers could disagree" in prompt
+    assert "Return at most three findings" in prompt
+
+
+def test_aggregation_prompt_rejects_subjective_and_test_only_findings(monkeypatch) -> None:
+    """The final validator should treat specialist claims as untrusted hypotheses."""
+    reviewer = _load_review_module()
+    captured = {}
+
+    def fake_aggregate(models, system_prompt, user_input, output_schema, api_key):
+        captured["system_prompt"] = system_prompt
+        return {
+            "summary": "No findings.",
+            "design_architecture": "No material concerns.",
+            "api_assessment": "No material concerns.",
+            "implementation_assessment": "No material concerns.",
+            "verdict": "Ship it",
+            "findings": [],
+        }
+
+    monkeypatch.setattr(reviewer, "_request_aggregate_completion", fake_aggregate)
+
+    reviewer._aggregate_reviews("{}", [], ("primary", "fallback"), "key")
+
+    prompt = captured["system_prompt"]
+    assert "False positives are substantially worse than missed findings" in prompt
+    assert "Specialist repetition is not proof" in prompt
+    assert "Never turn a test-coverage observation" in prompt
+    assert "into an inline finding" in prompt
+    assert "When uncertain, output no findings" in prompt
 
 
 def test_existing_review_requires_bot_login_and_matching_sha(monkeypatch) -> None:
@@ -251,6 +318,7 @@ def test_post_review_always_uses_comment_event(monkeypatch) -> None:
     finding = {
         "path": "source/example.py",
         "line": 8,
+        "category": "implementation",
         "severity": "critical",
         "title": "Incorrect reset",
         "body": "This retains state from the prior episode.",
@@ -275,7 +343,7 @@ def test_post_review_always_uses_comment_event(monkeypatch) -> None:
             "line": 8,
             "side": "RIGHT",
             "body": (
-                "🔴 Critical — **Incorrect reset**\n\n"
+                "🔴 Critical · Implementation — **Incorrect reset**\n\n"
                 "This retains state from the prior episode.\n\n"
                 "```suggestion\nstate[env_ids] = 0\n```"
             ),
@@ -294,6 +362,7 @@ def test_dry_run_prints_preview_without_posting(monkeypatch, capsys) -> None:
     finding = {
         "path": "source/example.py",
         "line": 8,
+        "category": "implementation",
         "severity": "warning",
         "title": "Incorrect reset",
         "body": "This retains state from the prior episode.",
