@@ -30,15 +30,25 @@ diff before using the remaining space for line-numbered current-file excerpts
 around every changed region. If only supplemental context is limited, the
 review explicitly states that the full diff was still reviewed.
 
-The review policy prioritizes precision over recall. It reports every finding
-that clears the high-confidence threshold, with no numerical cap, and rejects
-hypothetical edge cases, missing-test observations, logging preferences,
-optional hardening, alternative designs, formatting, and other subjective style
-feedback. Every finding must demonstrate a concrete design, architecture, API,
-or maintainability impact from an added line in the PR. Deterministic contract,
-type, and producer/consumer failures do not require a runtime reproduction or a
-specific external caller to be reported. The bot posts concise explanatory
-comments and does not generate GitHub replacement-code suggestion blocks.
+The review policy requires every specialist to inspect every patch hunk, compare
+deleted behavior with its replacement, trace changed producers and consumers,
+and perform a second adversarial pass before returning no findings. The review
+explicitly audits downstream callers, public exports and lazy-loading stubs,
+registrations, configuration and CLI forwarding, templates, examples,
+documentation includes, and per-package changelog obligations. Files converted
+to thin delegates, moved modules, and renamed symbols receive extra scrutiny.
+
+It reports every finding that clears the high-confidence threshold, with no
+numerical cap, and rejects hypothetical edge cases, missing-test-only
+observations, logging preferences, optional hardening, alternative designs,
+formatting, and other subjective style feedback. An unchanged downstream
+consumer broken by an added line is considered introduced by the PR and remains
+reportable. Every finding must demonstrate a concrete design, architecture,
+API, or maintainability impact from an added line in the PR. Deterministic
+contract, repository-rule, documentation-integration, type, and
+producer/consumer failures do not require a runtime reproduction or a specific
+external caller to be reported. The bot posts concise explanatory comments and
+does not generate GitHub replacement-code suggestion blocks.
 
 The bot calls NVIDIA's OpenAI-compatible
 `https://inference-api.nvidia.com/v1/chat/completions` endpoint directly. It

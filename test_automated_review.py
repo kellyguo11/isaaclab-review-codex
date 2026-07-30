@@ -289,6 +289,9 @@ def test_specialist_ensemble_runs_every_role_on_every_model(monkeypatch) -> None
     assert "coordinate-basis" in instructions["design_architecture"]
     assert "internal zero-copy wrapper escaping" in instructions["api_contract"]
     assert "still-fresh stale source" in instructions["implementation_quality"]
+    assert "documentation includes" in instructions["implementation_quality"]
+    assert "changelog fragments for every touched package" in instructions["implementation_quality"]
+    assert "files converted into thin delegates" in instructions["implementation_quality"]
     assert {(result["review_pass"], result["model"]) for result in results} == {
         (role, model)
         for role in ("design_architecture", "api_contract", "implementation_quality")
@@ -296,8 +299,8 @@ def test_specialist_ensemble_runs_every_role_on_every_model(monkeypatch) -> None
     }
 
 
-def test_specialist_prompt_defaults_to_no_speculative_findings(monkeypatch) -> None:
-    """The review prompt should explicitly favor precision over hypothetical concerns."""
+def test_specialist_prompt_requires_adversarial_review_before_no_findings(monkeypatch) -> None:
+    """The review prompt should require exhaustive analysis without inviting speculation."""
     reviewer = _load_review_module()
     captured = {}
 
@@ -316,17 +319,24 @@ def test_specialist_prompt_defaults_to_no_speculative_findings(monkeypatch) -> N
     )
 
     prompt = captured["system_prompt"]
-    assert "The correct default is zero findings" in prompt
+    assert "Zero findings is acceptable only after completing" in prompt
+    assert "conservatism is not a substitute for analysis" in prompt
     assert "Do not report hypothetical edge cases" in prompt
     assert "runtime reproduction is not required" in prompt
     assert "incompatible change to an existing public type" in prompt
     assert "Always use an empty suggestion" in prompt
     assert "Return every finding that satisfies this high bar" in prompt
     assert "do not add filler" in prompt
+    assert "Read every patch hunk" in prompt
+    assert "Compare the replacement with deleted behavior statement by statement" in prompt
+    assert "documentation include" in prompt
+    assert "Perform a second adversarial pass" in prompt
+    assert "source-inspection test" in prompt
+    assert "breaks an unchanged caller" in prompt
 
 
-def test_aggregation_prompt_rejects_subjective_and_test_only_findings(monkeypatch) -> None:
-    """The final validator should treat specialist claims as untrusted hypotheses."""
+def test_aggregation_prompt_rechecks_every_file_before_no_findings(monkeypatch) -> None:
+    """The final validator should recheck cross-file obligations without adding noise."""
     reviewer = _load_review_module()
     captured = {}
 
@@ -346,14 +356,20 @@ def test_aggregation_prompt_rejects_subjective_and_test_only_findings(monkeypatc
     reviewer._aggregate_reviews("{}", [], ("primary", "fallback"), "key")
 
     prompt = captured["system_prompt"]
-    assert "False positives are substantially worse than missed findings" in prompt
+    assert "Precision remains mandatory" in prompt
     assert "Specialist repetition is not proof" in prompt
     assert "Never turn a test-coverage observation" in prompt
     assert "into an inline finding" in prompt
-    assert "deterministic compatibility or type-contract failure" in prompt
+    assert "deterministic compatibility" in prompt
+    assert "type-contract failure" in prompt
     assert "new opt-in wrapper API" in prompt
     assert "Same-timestamp writes" in prompt
-    assert "When uncertain, output no findings" in prompt
+    assert "Every changed file has been examined" in prompt
+    assert "textual markers" in prompt
+    assert "trusted changelog rules" in prompt
+    assert "Hydra or preset forwarding" in prompt
+    assert "actively try to falsify" in prompt
+    assert "broken by an added line" in prompt
 
 
 def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -> None:
@@ -421,7 +437,10 @@ def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -
     assert captured["api_key"] == "nvidia-key"
     assert "really needs" in captured["system_prompt"]
     assert "fixing" in captured["system_prompt"]
-    assert "valid evidence without a runtime reproduction" in captured["system_prompt"]
+    assert "valid evidence" in captured["system_prompt"]
+    assert "without a runtime reproduction" in captured["system_prompt"]
+    assert "documentation integration failures" in captured["system_prompt"]
+    assert "impact appears in an unchanged caller" in captured["system_prompt"]
     assert "Never create a new finding" in captured["system_prompt"]
     assert captured["output_schema"] == reviewer._critic_schema()
     critic_input = json.loads(captured["user_input"])
