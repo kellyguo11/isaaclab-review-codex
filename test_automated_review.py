@@ -343,11 +343,11 @@ def test_aggregation_prompt_rechecks_every_file_before_no_findings(monkeypatch) 
     def fake_aggregate(models, system_prompt, user_input, output_schema, api_key):
         captured["system_prompt"] = system_prompt
         return {
-            "summary": "No findings.",
-            "design_architecture": "No material concerns.",
-            "api_assessment": "No material concerns.",
-            "implementation_assessment": "No material concerns.",
-            "verdict": "Ship it",
+            "summary": "The generator change keeps discovery template-driven.",
+            "design_architecture": "The new template follows the existing generator boundary.",
+            "api_assessment": "Existing algorithm names and CLI inputs remain accepted.",
+            "implementation_assessment": "Template discovery and rendering paths remain aligned.",
+            "verdict": "No blocking issues",
             "findings": [],
         }
 
@@ -370,6 +370,8 @@ def test_aggregation_prompt_rechecks_every_file_before_no_findings(monkeypatch) 
     assert "Hydra or preset forwarding" in prompt
     assert "actively try to falsify" in prompt
     assert "broken by an added line" in prompt
+    assert "summary and all three assessments must remain useful" in prompt
+    assert '"No blocking issues"' in prompt
 
 
 def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -> None:
@@ -435,17 +437,61 @@ def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -
 
     assert captured["models"] == ("gpt-model", "opus-model")
     assert captured["api_key"] == "nvidia-key"
-    assert "really needs" in captured["system_prompt"]
-    assert "fixing" in captured["system_prompt"]
-    assert "valid evidence" in captured["system_prompt"]
-    assert "without a runtime reproduction" in captured["system_prompt"]
-    assert "documentation integration failures" in captured["system_prompt"]
-    assert "impact appears in an unchanged caller" in captured["system_prompt"]
-    assert "Never create a new finding" in captured["system_prompt"]
+    prompt = " ".join(captured["system_prompt"].split())
+    assert "concrete design, architecture, API" in prompt
+    assert "valid evidence" in prompt
+    assert "without a runtime reproduction" in prompt
+    assert "documentation integration failures" in prompt
+    assert "impact appears in an unchanged caller" in prompt
+    assert "Never create a new finding" in prompt
+    assert "maintainability concern that warrants maintainer action" in prompt
+    assert "do not raise the bar" in prompt
+    assert "preserve useful" in prompt
+    assert "PR-specific feedback" in prompt
     assert captured["output_schema"] == reviewer._critic_schema()
     critic_input = json.loads(captured["user_input"])
     assert [finding["candidate_id"] for finding in critic_input["CANDIDATE_REVIEW"]["findings"]] == [0, 1]
     assert verified["findings"] == [candidates[0]]
+
+
+def test_prepublication_critic_preserves_specific_feedback_without_findings(monkeypatch) -> None:
+    """A zero-finding result should retain the critic's pull-request-specific assessment."""
+    reviewer = _load_review_module()
+
+    def fake_verification(models, system_prompt, user_input, output_schema, api_key):
+        return {
+            "summary": "The template remains the source of truth for RSL-RL algorithm discovery.",
+            "design_architecture": "The new distillation template stays within the existing generator boundary.",
+            "api_assessment": "Existing PPO names and CLI inputs remain accepted.",
+            "implementation_assessment": "Discovery, rendering, and generated config naming were traced together.",
+            "verdict": "No blocking issues",
+            "accepted_finding_ids": [],
+        }
+
+    monkeypatch.setattr(reviewer, "_request_verification_completion", fake_verification)
+
+    verified = reviewer._review_candidate_review(
+        '{"pull_request":{},"files":[]}',
+        {
+            "summary": "One candidate concern.",
+            "design_architecture": "Review the template boundary.",
+            "api_assessment": "Review the CLI contract.",
+            "implementation_assessment": "Review discovery and rendering.",
+            "verdict": "Minor fixes needed",
+            "findings": [],
+        },
+        ("opus-model", "gpt-model"),
+        "nvidia-key",
+    )
+
+    assert verified == {
+        "summary": "The template remains the source of truth for RSL-RL algorithm discovery.",
+        "design_architecture": "The new distillation template stays within the existing generator boundary.",
+        "api_assessment": "Existing PPO names and CLI inputs remain accepted.",
+        "implementation_assessment": "Discovery, rendering, and generated config naming were traced together.",
+        "verdict": "No blocking issues",
+        "findings": [],
+    }
 
 
 def test_prepublication_critic_fails_closed(monkeypatch) -> None:
@@ -464,6 +510,31 @@ def test_prepublication_critic_fails_closed(monkeypatch) -> None:
             ("opus-model", "gpt-model"),
             "nvidia-key",
         )
+
+
+def test_review_body_keeps_specific_feedback_without_inline_findings() -> None:
+    """A clean review should explain what was checked instead of posting boilerplate."""
+    reviewer = _load_review_module()
+
+    body = reviewer._build_review_body(
+        {
+            "summary": "The template remains the source of truth for RSL-RL algorithm discovery.",
+            "design_architecture": "The new template follows the existing generator boundary.",
+            "api_assessment": "Existing algorithm names and CLI inputs remain accepted.",
+            "implementation_assessment": "Discovery, rendering, and config naming were traced together.",
+            "verdict": "No blocking issues",
+        },
+        [],
+        "<!-- marker -->",
+        context_truncated=False,
+    )
+
+    assert "The template remains the source of truth" in body
+    assert "**No blocking issues.**" in body
+    assert "No inline issue met the actionable-evidence threshold" in body
+    assert "No material issues were identified" not in body
+    assert "No material concerns" not in body
+    assert "_Automated review; human maintainers own approval decisions._" in body
 
 
 def test_existing_review_requires_bot_login_and_matching_sha(monkeypatch) -> None:

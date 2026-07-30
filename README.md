@@ -50,6 +50,13 @@ producer/consumer failures do not require a runtime reproduction or a specific
 external caller to be reported. The bot posts concise explanatory comments and
 does not generate GitHub replacement-code suggestion blocks.
 
+When no inline finding clears the evidence threshold, the bot still posts
+pull-request-specific feedback: the design approach reviewed, the exact API or
+compatibility surface checked, the implementation paths traced, and concrete
+non-blocking tradeoffs or residual risks. It uses `No blocking issues` for that
+outcome rather than treating the automated review as an approval or saying
+`Ship it`.
+
 The bot calls NVIDIA's OpenAI-compatible
 `https://inference-api.nvidia.com/v1/chat/completions` endpoint directly. It
 does not require OpenClaw, Slack, an OpenClaw gateway, an OpenAI API key, a
