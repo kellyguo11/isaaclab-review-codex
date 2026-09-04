@@ -244,8 +244,9 @@ first and use it only deliberately.
 
 ### Request another review from a PR
 
-After pushing new commits, the PR author or a repository owner, member, or
-collaborator can add this exact conversation comment:
+After pushing new commits, the PR author or a user with effective `write`,
+`maintain`, or `admin` permission on the repository can add this exact
+conversation comment:
 
 ```text
 @isaaclab-review-bot review
@@ -256,6 +257,11 @@ poll and reviews the PR's current head. Put the command in a normal PR
 conversation comment, not an inline code-review comment. A command for a head
 the bot already reviewed is acknowledged in the local log and skipped before
 inference, preventing duplicate reviews and model spend.
+
+The bot verifies effective access with GitHub's repository-permission endpoint.
+It does not use the comment's coarse `author_association` label, which may say
+`CONTRIBUTOR` even when a user has elevated access through an organization,
+team, or enterprise role.
 
 Press `Ctrl+C` to stop a foreground watcher.
 

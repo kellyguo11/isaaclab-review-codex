@@ -282,10 +282,18 @@ def test_poll_reviews_new_pull_request_once_and_preserves_prior_state(monkeypatc
     }
 
 
-def test_review_command_matching_and_authorization() -> None:
-    """Only exact commands from a PR author or trusted collaborator should run."""
+def test_review_command_matching_and_authorization(monkeypatch) -> None:
+    """Exact commands should allow the PR author and users with write-level access."""
     local_bot = _load_local_bot()
     pull_request = {"user": {"login": "external-author"}}
+    permission_calls = []
+
+    def fake_github_json(path, token):
+        permission_calls.append((path, token))
+        permission = "admin" if path.endswith("/maintainer/permission") else "read"
+        return {"permission": permission}
+
+    monkeypatch.setattr(local_bot.automated_review, "_github_json", fake_github_json)
 
     assert local_bot._is_review_command("@isaaclab-review-bot review")
     assert local_bot._is_review_command("  /isaaclab-review  ")
@@ -293,19 +301,31 @@ def test_review_command_matching_and_authorization() -> None:
     assert local_bot._is_authorized_review_request(
         {"user": {"login": "external-author"}, "author_association": "NONE"},
         pull_request,
+        "isaac-sim/IsaacLab",
+        "read-token",
     )
     assert local_bot._is_authorized_review_request(
-        {"user": {"login": "maintainer"}, "author_association": "MEMBER"},
+        {"user": {"login": "maintainer"}, "author_association": "CONTRIBUTOR"},
         pull_request,
+        "isaac-sim/IsaacLab",
+        "read-token",
     )
     assert not local_bot._is_authorized_review_request(
-        {"user": {"login": "unrelated-user"}, "author_association": "NONE"},
+        {"user": {"login": "unrelated-user"}, "author_association": "MEMBER"},
         pull_request,
+        "isaac-sim/IsaacLab",
+        "read-token",
     )
     assert not local_bot._is_authorized_review_request(
         {"user": {"login": "isaaclab-review-bot[bot]"}, "author_association": "MEMBER"},
         pull_request,
+        "isaac-sim/IsaacLab",
+        "read-token",
     )
+    assert permission_calls == [
+        ("/repos/isaac-sim/IsaacLab/collaborators/maintainer/permission", "read-token"),
+        ("/repos/isaac-sim/IsaacLab/collaborators/unrelated-user/permission", "read-token"),
+    ]
 
 
 def test_first_command_poll_baselines_without_processing_old_comments(tmp_path) -> None:
@@ -409,7 +429,11 @@ def test_untrusted_commenter_cannot_trigger_review(monkeypatch, tmp_path) -> Non
     monkeypatch.setattr(
         local_bot.automated_review,
         "_github_json",
-        lambda path, token: {"state": "open", "head": {"sha": "current-head"}, "user": {"login": "pr-author"}},
+        lambda path, token: (
+            {"permission": "read"}
+            if path.endswith("/collaborators/unrelated-user/permission")
+            else {"state": "open", "head": {"sha": "current-head"}, "user": {"login": "pr-author"}}
+        ),
     )
     token_requests = []
     provider = SimpleNamespace(get_token=lambda write: token_requests.append(write) or "read-token")

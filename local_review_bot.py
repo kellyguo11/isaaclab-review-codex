@@ -29,7 +29,7 @@ _DEFAULT_REPOSITORY = "isaac-sim/IsaacLab"
 _DEFAULT_CLIENT_ID = "Iv23liPhQICNbdPQ9bBU"
 _EXPECTED_APP_SLUG = "isaaclab-review-bot"
 _REVIEW_COMMANDS = frozenset({"@isaaclab-review-bot review", "/isaaclab-review"})
-_TRUSTED_AUTHOR_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+_TRUSTED_REPOSITORY_PERMISSIONS = frozenset({"write", "maintain", "admin"})
 _DEFAULT_POLL_INTERVAL_SECONDS = 60
 _COMMENT_CURSOR_OVERLAP_SECONDS = 2
 _MAX_PROCESSED_COMMANDS = 10_000
@@ -516,10 +516,10 @@ def _poll_review_commands(
                 error=True,
             )
             continue
-        if not _is_authorized_review_request(comment, pull_request):
+        if not _is_authorized_review_request(comment, pull_request, configuration.repository, read_token):
             automated_review._progress(
                 f"Ignoring review command from {commenter or '<unknown>'} on PR #{pull_request_number}: "
-                "only the PR author or a repository collaborator may trigger the bot."
+                "only the PR author or a user with write, maintain, or admin repository permission may trigger the bot."
             )
             continue
 
@@ -582,14 +582,28 @@ def _comment_pull_request_number(comment: dict[str, Any], repository: str) -> in
     return int(number) if number.isdigit() and int(number) > 0 else None
 
 
-def _is_authorized_review_request(comment: dict[str, Any], pull_request: dict[str, Any]) -> bool:
-    """Allow the PR author and trusted repository collaborators to request reviews."""
+def _is_authorized_review_request(
+    comment: dict[str, Any],
+    pull_request: dict[str, Any],
+    repository: str,
+    github_token: str,
+) -> bool:
+    """Allow the PR author and users with write-level repository access to request reviews."""
     commenter = _nested_string(comment, "user", "login")
     if not commenter or commenter.casefold() == automated_review._BOT_LOGIN.casefold():
         return False
     pull_request_author = _nested_string(pull_request, "user", "login")
-    association = str(comment.get("author_association") or "").upper()
-    return commenter.casefold() == pull_request_author.casefold() or association in _TRUSTED_AUTHOR_ASSOCIATIONS
+    if commenter.casefold() == pull_request_author.casefold():
+        return True
+    encoded_commenter = urllib.parse.quote(commenter, safe="")
+    permission_response = automated_review._github_json(
+        f"/repos/{repository}/collaborators/{encoded_commenter}/permission",
+        github_token,
+    )
+    if not isinstance(permission_response, dict):
+        return False
+    permission = str(permission_response.get("permission") or "").casefold()
+    return permission in _TRUSTED_REPOSITORY_PERMISSIONS
 
 
 def _nested_string(value: dict[str, Any], *keys: str) -> str:
