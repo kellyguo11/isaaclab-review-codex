@@ -49,14 +49,21 @@ _PROGRESS_HEARTBEAT_SECONDS = 30
 _REQUEST_TIMEOUT_SECONDS = 600
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 _SEVERITY_ORDER = {"critical": 0, "warning": 1, "suggestion": 2}
-_FINDING_CATEGORIES = {"design_architecture", "api", "implementation", "style_consistency", "test_quality"}
+_FINDING_CATEGORIES = {
+    "design_architecture",
+    "api",
+    "compatibility",
+    "implementation",
+    "style_consistency",
+    "test_quality",
+}
 _VERDICTS = ("No blocking issues", "Minor fixes needed", "Significant concerns", "Needs rework")
 _SEVERITY_LABELS = {
     "critical": "🔴 Critical",
     "warning": "🟡 Warning",
     "suggestion": "🔵 Suggestion",
 }
-_HUNK_HEADER_PATTERN = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+_HUNK_HEADER_PATTERN = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
 @dataclass(frozen=True)
@@ -64,7 +71,7 @@ class ReviewInput:
     """Context supplied to each review pass."""
 
     serialized: str
-    valid_lines: dict[str, set[int]]
+    valid_lines: dict[str, dict[str, set[int]]]
     truncated: bool
     patches_truncated: bool
 
@@ -337,15 +344,15 @@ def _build_review_input(
     if len(test_audit_guidance) > _MAX_TEST_AUDIT_GUIDANCE_CHARS:
         test_audit_guidance = test_audit_guidance[:_MAX_TEST_AUDIT_GUIDANCE_CHARS] + "\n[test-audit guidance truncated]"
 
-    valid_lines: dict[str, set[int]] = {}
+    valid_lines: dict[str, dict[str, set[int]]] = {}
     added_lines_by_file: list[set[int]] = []
     prepared_files: list[dict[str, Any]] = []
     patches: list[str] = []
     for file_data in changed_files:
         path = str(file_data.get("filename", ""))
         patch = str(file_data.get("patch") or "")
-        added_lines = _changed_right_lines(patch)
-        valid_lines[path] = added_lines
+        deleted_lines, added_lines = _changed_diff_lines(patch)
+        valid_lines[path] = {"LEFT": deleted_lines, "RIGHT": added_lines}
         added_lines_by_file.append(added_lines)
         prepared_files.append(
             {
@@ -355,6 +362,7 @@ def _build_review_input(
                 "additions": file_data.get("additions"),
                 "deletions": file_data.get("deletions"),
                 "valid_added_line_ranges": _format_line_ranges(added_lines),
+                "valid_deleted_line_ranges": _format_line_ranges(deleted_lines),
                 "patch": "",
                 "current_file": "",
             }
@@ -729,25 +737,35 @@ def _decode_text_blob(encoded: str) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def _changed_right_lines(patch: str) -> set[int]:
-    """Return added right-side line numbers from a unified diff patch."""
-    lines: set[int] = set()
+def _changed_diff_lines(patch: str) -> tuple[set[int], set[int]]:
+    """Return deleted left-side and added right-side line numbers from a unified diff."""
+    deleted_lines: set[int] = set()
+    added_lines: set[int] = set()
+    left_line: int | None = None
     right_line: int | None = None
     for patch_line in patch.splitlines():
         match = _HUNK_HEADER_PATTERN.match(patch_line)
         if match:
-            right_line = int(match.group(1))
+            left_line = int(match.group(1))
+            right_line = int(match.group(2))
             continue
-        if right_line is None or patch_line.startswith("\\ No newline"):
+        if left_line is None or right_line is None or patch_line.startswith("\\ No newline"):
             continue
         if patch_line.startswith("+"):
-            lines.add(right_line)
+            added_lines.add(right_line)
             right_line += 1
         elif patch_line.startswith("-"):
-            continue
+            deleted_lines.add(left_line)
+            left_line += 1
         else:
+            left_line += 1
             right_line += 1
-    return lines
+    return deleted_lines, added_lines
+
+
+def _changed_right_lines(patch: str) -> set[int]:
+    """Return added right-side line numbers from a unified diff patch."""
+    return _changed_diff_lines(patch)[1]
 
 
 def _format_line_ranges(lines: set[int]) -> str:
@@ -775,32 +793,47 @@ def _run_specialist_reviews(
     """Run every specialist pass on every ensemble model."""
     roles = {
         "design_architecture": (
-            "Review structural decisions introduced by the diff: responsibility and state ownership, abstraction and "
-            "module boundaries, dependency direction, lifecycle integration, reuse of existing architecture, and "
-            "cross-package effects. For backend implementations of shared APIs, verify that backend ordering, sign, "
-            "coordinate-basis, and cache-lifecycle details are transformed at the backend boundary rather than leaking "
-            "into the common contract. Flag only a concrete architectural inconsistency with demonstrated impact; do "
-            "not prefer a different design merely because it is possible."
+            "Perform a skeptical, detail-oriented review of every structural decision introduced by the diff: "
+            "responsibility and state ownership, abstraction and module boundaries, dependency direction, lifecycle "
+            "integration, reuse of existing architecture, and cross-package effects. Compare each changed abstraction "
+            "with the base behavior it replaces and identify lost invariants, bypassed owners, split state, duplicated "
+            "mechanisms, leaky boundaries, and new coupling. For backend implementations of shared APIs, verify that "
+            "backend ordering, sign, coordinate-basis, and cache-lifecycle details are transformed at the backend "
+            "boundary rather than leaking into the common contract. Treat a directly evidenced architectural "
+            "regression or maintenance burden as reportable even when the code still works on the demonstrated happy "
+            "path. Do not prefer a different design merely because it is possible."
         ),
         "api_contract": (
-            "Review public and extension-facing contracts introduced or changed by the diff: API compatibility and "
-            "deprecation, naming and discoverability, configuration and CLI behavior, type and shape contracts, units, "
-            "defaults, exports, and caller migration. Compare both annotations and actual runtime value types before and "
-            "after the change. An internal zero-copy wrapper escaping through an existing public property or return value "
-            "is a compatibility change even when related new APIs are opt-in. Flag only a directly evidenced contract "
-            "break or repository-rule violation."
+            "Perform a deliberately picky compatibility audit of every public, documented, serialized, CLI, "
+            "configuration, registration, and extension-facing contract touched by the diff. Compare the old and new "
+            "name, import path, signature, positional and keyword arguments, defaults, accepted inputs, return and "
+            "runtime types, dtype, shape, units, ordering, mutability, exceptions, side effects, timing, device, task IDs, "
+            "configuration keys, and serialized forms. Protected hooks and configuration fields count when downstream "
+            "extensions are expected to override or consume them. An internal zero-copy wrapper escaping through an "
+            "existing public property or return value is a compatibility change even when related new APIs are opt-in. "
+            "Classify every directly evidenced incompatible change as category compatibility and flag it when the PR "
+            "does not preserve the old contract through the required deprecation cycle. A release note, changelog entry, "
+            "migration note, major-version label, or replacement API alone is not a deprecation cycle. Require the old "
+            "entry point or behavior to remain functional for the repository-prescribed window, use the established "
+            "warning mechanism with a replacement and removal plan, update migration documentation, and cover both old "
+            "and new paths during the transition. Do not invent an exact removal version when trusted guidance does not "
+            "specify one, and do not treat an incidental private implementation detail as public without evidence."
         ),
         "implementation_quality": (
-            "Review whether the implementation follows trusted repository instructions and established adjacent code "
-            "patterns. Focus on clear control flow, appropriate reuse, maintainable complexity, and consistent public "
-            "implementation style. Audit the complete changed-file list against repository-wide obligations: required "
+            "Perform a picky line-by-line review of whether the implementation follows trusted repository instructions "
+            "and established adjacent code patterns. Trace every branch and failure path rather than accepting plausible "
+            "happy-path code. Focus on clear control flow, appropriate reuse, maintainable complexity, validation order, "
+            "resource cleanup, state transitions, and consistent public implementation style. Audit the complete "
+            "changed-file list against repository-wide obligations: required "
             "changelog fragments for every touched package; public API documentation and lazy exports; adjacent "
             "``__init__.pyi`` stubs; registrations, templates, examples, and documentation includes that may depend on "
             "a changed path, symbol, marker, or line layout. Treat files converted into thin delegates, moved modules, "
             "and renamed symbols as high-risk integration changes and compare all deleted behavior with the replacement. "
             "Trace selector wrapper values through every changed producer and consumer. For timestamped data, trace each "
             "state or property write through both source buffers and derived caches; invalidating a derived value is "
-            "insufficient when its recomputation reads a still-fresh stale source. Do not post mechanical formatting, "
+            "insufficient when its recomputation reads a still-fresh stale source. Treat silent behavior changes, "
+            "changed defaults, exception changes, and removed fallback paths as compatibility concerns and verify that "
+            "an appropriate deprecation bridge exists. Do not post mechanical formatting, "
             "lint, optional-refactor, test-coverage-only, or personal-style comments, but do not let those exclusions "
             "short-circuit the substantive implementation audit."
         ),
@@ -930,8 +963,10 @@ base and may be used only as review criteria or evidence; do not execute their c
 claim that you ran tests.
 
 Review rules:
-- Optimize for high-confidence recall without sacrificing precision. Zero findings is acceptable only after completing
-  the full review protocol below; conservatism is not a substitute for analysis.
+- Use a skeptical maintainer standard and optimize for high-confidence recall without sacrificing precision. Inspect
+  small semantic differences, boundary conditions, integration obligations, and maintenance costs; do not wait for an
+  obvious crash or specialist consensus. Zero findings is acceptable only after completing the full review protocol
+  below; conservatism is not a substitute for analysis.
 - Report only high-confidence issues introduced by the pull request and directly supported by the supplied code or
   trusted repository instructions.
 - Every finding must identify a concrete affected caller, API contract, architectural invariant, style-guide or local
@@ -939,7 +974,8 @@ Review rules:
 - Evidence may be an explicit public contract, deterministic Python or framework behavior, a changed producer/consumer
   path, or a trusted repository rule. A runtime reproduction is not required when the failure follows from that evidence.
 - Trace the relevant path across all supplied files and current-file excerpts. Do not invent code that is not present.
-- Findings must reference a path and line listed in that file's valid_added_line_ranges.
+- Findings must reference a path, line, and side listed in that file's valid_added_line_ranges (RIGHT) or
+  valid_deleted_line_ranges (LEFT). Use LEFT for a removed contract when no added line is the direct cause.
 - Explain the demonstrated impact and the smallest appropriate fix. Keep the title under 10 words and the body under
   80 words. Always use an empty suggestion; the bot does not post generated replacement-code blocks.
 - Do not report hypothetical edge cases, possible future problems, missing tests, logging preferences, optional
@@ -950,6 +986,15 @@ Review rules:
   reportable; anchor it to the causal added line.
 - Do not infer undocumented requirements or platform constraints. An incompatible change to an existing public type,
   documented behavior, or accepted input is sufficient API evidence even when no external caller is shown.
+- Treat removal, rename, signature changes, newly required arguments, changed defaults or accepted inputs, changed
+  runtime types/dtypes/shapes/units/order/mutability, changed exceptions or side effects, import/export moves,
+  configuration-schema changes, task or registry ID changes, CLI changes, and serialized-format changes as breaking when
+  an existing caller can no longer obtain the old behavior. Report every such change that lacks a complete deprecation
+  bridge. A changelog, migration note, major-version claim, or replacement API by itself does not preserve compatibility.
+- A complete deprecation bridge keeps the old contract functional for the repository-prescribed cycle, emits the
+  established targeted warning with replacement and removal guidance, documents migration, and validates old and new
+  paths during the transition. Do not demand an invented version or duration when the trusted policy does not specify
+  one, but do require an actual transition rather than immediate removal.
 - An implementation-style finding must violate a trusted repository rule or established adjacent pattern and have a
   material API or maintainability impact; preference alone is not a finding.
 - If the failure path is incomplete or the concern is only a design preference, omit it.
@@ -962,14 +1007,17 @@ Required review protocol:
 2. Compare the replacement with deleted behavior statement by statement. Check lifecycle and cleanup, error paths,
    return and runtime types, shapes, units, device placement, mutation, cache invalidation, and behavior when optional
    values are omitted.
-3. Trace each changed producer forward through every supplied consumer and each changed consumer backward to its
+3. Build an explicit compatibility ledger for every touched contract: old behavior, new behavior, affected callers,
+   whether the change is additive or breaking, and—if breaking—the compatibility shim, warning, migration path, and
+   removal plan. Do not return zero findings while any breaking ledger entry lacks a deprecation cycle.
+4. Trace each changed producer forward through every supplied consumer and each changed consumer backward to its
    producers. Check package boundaries, backend boundaries, public exports, lazy-loading stubs, registries, factories,
    configuration inheritance, scripts, examples, templates, documentation includes, and changelog obligations.
-4. Check cross-file consistency. A helper that works in isolation is not sufficient when an entry point, wrapper,
+5. Check cross-file consistency. A helper that works in isolation is not sufficient when an entry point, wrapper,
    caller, documentation fragment, or package export still depends on the old contract, path, marker, or line layout.
-5. Perform a second adversarial pass before returning zero findings: formulate the strongest concrete failure for every
+6. Perform a second adversarial pass before returning zero findings: formulate the strongest concrete failure for every
    changed file, try to prove it from the supplied evidence, and discard it only after the relevant path is shown safe.
-6. Missing tests alone are not a finding, but untested new public or integration behavior requires closer manual tracing;
+7. Missing tests alone are not a finding, but untested new public or integration behavior requires closer manual tracing;
    never assume it works merely because a thin delegation or source-inspection test exists. When tests are changed, audit
    every added test case against the authoring gate and compare it with the supplied existing test ownership evidence.
 """
@@ -997,10 +1045,12 @@ related_existing_tests, and ci_test_routing fields come from the trusted base an
 Treat specialist claims as hypotheses, not facts, and re-check every claim against the supplied patch and file context.
 
 Produce one short unified review covering design and architecture, public or extension-facing API contracts,
-implementation quality, exact style consistency, and the value and non-duplication of changed tests. Precision remains
-mandatory, but the requested style and test audits are deliberately picky: do not discard a directly evidenced defect
-merely because it is non-functional or appropriately classified as a suggestion. Do not mention specialists, agents,
-pipelines, models, or multiple review passes.
+compatibility and deprecation, implementation quality, exact style consistency, and the value and non-duplication of
+changed tests. Apply a skeptical maintainer standard: inspect small semantic differences and concrete maintenance costs,
+and do not require an obvious crash, an external bug report, or agreement between specialists. Precision remains
+mandatory, but the requested main, style, and test audits are deliberately picky: do not discard a directly evidenced
+defect merely because it is non-functional or appropriately classified as a suggestion. Do not mention specialists,
+agents, pipelines, models, or multiple review passes.
 
 A final finding is allowed only when all of these are true:
 1. It was introduced by this diff and is anchored to an added line.
@@ -1009,6 +1059,13 @@ A final finding is allowed only when all of these are true:
 3. It has a concrete API, architectural, user, style-consistency, test-quality, or maintenance impact. An exact
    contribution-guide, adjacent-code, or test-audit violation satisfies this condition even without runtime impact.
 4. The proposed correction is specific and proportionate.
+
+Every incompatible change to an existing supported contract that lacks a complete deprecation cycle is a finding, not a
+non-blocking observation. Classify it as compatibility and use at least warning severity. A complete transition keeps the
+old contract functional for the repository-prescribed window, emits the established targeted warning with replacement
+and removal guidance, documents migration, and validates old and new paths. A changelog, migration note, major-version
+claim, or replacement API alone is not a transition. Do not require an invented version or duration when trusted policy
+does not specify one, and do not classify incidental private details as contracts without evidence.
 
 Before accepting a no-finding result, explicitly check these common cross-cutting contracts when they are touched:
 - Every changed file has been examined, including deletions. For a moved, renamed, shortened, or delegated file, compare
@@ -1020,6 +1077,10 @@ Before accepting a no-finding result, explicitly check these common cross-cuttin
   runtime initialization order, cleanup, and programmatic-call behavior.
 - Existing public properties and returns must retain their runtime types unless the change follows the trusted
   deprecation policy; a new opt-in wrapper API does not authorize changing a separate legacy property.
+- Renamed or removed symbols, moved import paths, signature or keyword changes, newly required arguments, defaults,
+  accepted inputs, runtime types, dtypes, shapes, units, ordering, mutability, exceptions, side effects, CLI flags,
+  configuration keys, registry or task IDs, and serialized forms have been compared against the old contract. Each
+  incompatible item has a functional compatibility bridge and complete deprecation cycle.
 - Shared articulation dynamics must use the same public ordering, sign, and coordinate basis across backends, including
   Jacobians, mass matrices, generalized forces, and reversed joint orientations.
 - Same-timestamp writes must invalidate every stale source and derived cache used by the next read.
@@ -1040,18 +1101,22 @@ reject a deterministic compatibility, repository-rule, style, documentation-inte
 failure merely because a runtime reproduction or external caller is absent.
 
 Before returning no findings, independently repeat the required specialist protocol against REVIEW_INPUT rather than
-trusting empty specialist results. Account for every changed file and actively try to falsify the proposed no-finding
-result. Return no findings only after each plausible failure path has been checked and lacks direct supporting evidence.
-Even when no inline finding clears the evidence threshold, the summary and all five assessments must remain useful and
-specific to this pull request: state the design approach reviewed, exact API or compatibility surface checked, important
-implementation paths traced, style/local-pattern checks performed, and which changed tests were audited for necessity
-and duplication. If no tests changed, say so in the test assessment. Never use generic phrases such as "No material
-concerns" or "No issues found" as an assessment. Use the "No blocking issues" verdict when the findings list is empty.
+trusting empty specialist results. Account for every changed file, build the old-versus-new compatibility ledger, and
+actively try to falsify the proposed no-finding result. Return no findings only after each plausible failure path has
+been checked and lacks direct supporting evidence. Even when no inline finding clears the evidence threshold, the
+summary and all six assessments must remain useful and specific to this pull request: state the design approach reviewed,
+exact API surface checked, compatibility and deprecation result, important implementation paths traced,
+style/local-pattern checks performed, and which changed tests were audited for necessity and duplication. The
+compatibility assessment must begin with ``Breaking changes: none identified.`` or ``Breaking changes:`` followed by an
+explicit list of the breaks and deprecation gaps. If no tests changed, say so in the test assessment. Never use generic
+phrases such as "No material concerns" or "No issues found" as an assessment. Use the "No blocking issues" verdict only
+when the findings list is empty and no breaking change lacks a deprecation cycle.
 
 Deduplicate accepted findings and return every finding that satisfies this high bar; do not add filler. Keep the
 summary and each assessment to one or two sentences. Keep finding titles under 10 words and bodies under 80 words.
-Every finding must use a path and line from valid_added_line_ranges. Use only the verdicts in the output schema. Human
-maintainers own approval decisions, so never approve or request changes.
+Every finding must use a path, line, and side from valid_added_line_ranges (RIGHT) or valid_deleted_line_ranges (LEFT).
+Use only the verdicts in the output schema. Human maintainers own approval decisions, so never approve or request
+changes.
 """
     aggregator_input = json.dumps(
         {
@@ -1085,8 +1150,9 @@ related_existing_tests, and ci_test_routing fields come from the trusted base an
 
 Review the proposed review itself before anything is posted. Re-check every candidate finding against the patch,
 current-file context, and trusted repository instructions. Accept a finding when the supplied evidence directly supports
-that the pull request introduced a concrete design, architecture, API, implementation, style-consistency, or test-quality
-problem that needs fixing or a specific maintainability concern that warrants maintainer action before merge. A
+that the pull request introduced a concrete design, architecture, API, compatibility, implementation,
+style-consistency, or test-quality problem that needs fixing or a specific maintainability concern that warrants
+maintainer action before merge. A
 suggestion need not be release-blocking, but it must identify an exact changed construct, demonstrated violation, cost,
 duplication, or ambiguity, and a proportionate correction. Explicit contract changes, deterministic language or
 framework behavior, changed producer/consumer paths, broken unchanged consumers, documentation integration failures,
@@ -1098,17 +1164,26 @@ test-only: those are explicit review goals. Do not reject a finding merely becau
 caller, include, template, registration, or existing test when the changed line and supplied evidence establish the
 causal path.
 
+Be especially skeptical of a proposed no-finding result for a removed or changed contract. Accept every directly
+evidenced breaking change that lacks a complete deprecation bridge, using the same old-contract-functional, targeted
+warning, migration documentation, removal guidance, and transition-coverage criteria as the candidate review. A
+changelog, migration note, major-version claim, or replacement API alone is not sufficient. Do not reject a compatibility
+finding because the changed symbol has no in-repository caller when it is public, documented, serialized, configurable,
+registered, CLI-facing, or an established extension hook. LEFT-side findings on deleted lines are valid evidence.
+
 You may only accept or reject the numbered candidate findings. Never create a new finding, move a finding to another
 location, or reinterpret one as a different issue. Return the IDs of accepted findings exactly as supplied. Reject
 unsupported claims, but do not raise the bar from directly evidenced and actionable to already reproduced or
 release-blocking.
 
-Rewrite the short overall summary and all five assessments to match only the accepted findings. If none survive,
-preserve useful PR-specific feedback: name the concrete design decision reviewed, API or compatibility surface checked,
-implementation paths traced, style and adjacent-pattern checks performed, tests audited for necessity and duplication,
-and any non-blocking tradeoff or residual risk. If no tests changed, say so in the test assessment. Do not use generic
-"No material concerns" boilerplate. Use the "No blocking issues" verdict when no findings survive. Human maintainers
-own approval decisions, so never approve or request changes.
+Rewrite the short overall summary and all six assessments to match only the accepted findings. The compatibility
+assessment must begin with ``Breaking changes: none identified.`` or ``Breaking changes:`` followed by the identified
+breaks and deprecation gaps. If none survive, preserve useful PR-specific feedback: name the concrete design decision
+reviewed, API surface checked, compatibility ledger result, implementation paths traced, style and adjacent-pattern
+checks performed, tests audited for necessity and duplication, and any non-blocking tradeoff or residual risk. If no
+tests changed, say so in the test assessment. Do not use generic "No material concerns" boilerplate. Use the "No
+blocking issues" verdict only when no findings survive and no breaking change lacks a deprecation cycle. Human
+maintainers own approval decisions, so never approve or request changes.
 """
     candidate_findings = candidate_review.get("findings")
     if not isinstance(candidate_findings, list):
@@ -1162,6 +1237,7 @@ own approval decisions, so never approve or request changes.
             "summary",
             "design_architecture",
             "api_assessment",
+            "compatibility_assessment",
             "implementation_assessment",
             "style_assessment",
             "test_assessment",
@@ -1308,6 +1384,7 @@ def _aggregate_schema() -> dict[str, Any]:
                 "summary": {"type": "string"},
                 "design_architecture": {"type": "string"},
                 "api_assessment": {"type": "string"},
+                "compatibility_assessment": {"type": "string"},
                 "implementation_assessment": {"type": "string"},
                 "style_assessment": {"type": "string"},
                 "test_assessment": {"type": "string"},
@@ -1321,6 +1398,7 @@ def _aggregate_schema() -> dict[str, Any]:
                 "summary",
                 "design_architecture",
                 "api_assessment",
+                "compatibility_assessment",
                 "implementation_assessment",
                 "style_assessment",
                 "test_assessment",
@@ -1342,6 +1420,7 @@ def _critic_schema() -> dict[str, Any]:
                 "summary": {"type": "string"},
                 "design_architecture": {"type": "string"},
                 "api_assessment": {"type": "string"},
+                "compatibility_assessment": {"type": "string"},
                 "implementation_assessment": {"type": "string"},
                 "style_assessment": {"type": "string"},
                 "test_assessment": {"type": "string"},
@@ -1358,6 +1437,7 @@ def _critic_schema() -> dict[str, Any]:
                 "summary",
                 "design_architecture",
                 "api_assessment",
+                "compatibility_assessment",
                 "implementation_assessment",
                 "style_assessment",
                 "test_assessment",
@@ -1376,16 +1456,24 @@ def _finding_schema() -> dict[str, Any]:
         "properties": {
             "path": {"type": "string"},
             "line": {"type": "integer"},
+            "side": {"type": "string", "enum": ["LEFT", "RIGHT"]},
             "category": {
                 "type": "string",
-                "enum": ["design_architecture", "api", "implementation", "style_consistency", "test_quality"],
+                "enum": [
+                    "design_architecture",
+                    "api",
+                    "compatibility",
+                    "implementation",
+                    "style_consistency",
+                    "test_quality",
+                ],
             },
             "severity": {"type": "string", "enum": ["critical", "warning", "suggestion"]},
             "title": {"type": "string"},
             "body": {"type": "string"},
             "suggestion": {"type": "string", "const": ""},
         },
-        "required": ["path", "line", "category", "severity", "title", "body", "suggestion"],
+        "required": ["path", "line", "side", "category", "severity", "title", "body", "suggestion"],
         "additionalProperties": False,
     }
 
@@ -1450,34 +1538,41 @@ def _parse_json_object(content: str) -> dict[str, Any]:
     return parsed
 
 
-def _validate_findings(findings: Any, valid_lines: dict[str, set[int]]) -> list[dict[str, Any]]:
-    """Keep only well-formed, unique findings attached to added diff lines."""
+def _validate_findings(
+    findings: Any,
+    valid_lines: dict[str, dict[str, set[int]]],
+) -> list[dict[str, Any]]:
+    """Keep only well-formed, unique findings attached to changed diff lines."""
     if not isinstance(findings, list):
         return []
     validated: list[dict[str, Any]] = []
-    seen_locations: set[tuple[str, int]] = set()
+    seen_locations: set[tuple[str, str, int]] = set()
     for finding in findings:
         if not isinstance(finding, dict):
             continue
         path = finding.get("path")
         line = finding.get("line")
+        side = finding.get("side", "RIGHT")
         category = finding.get("category")
         severity = finding.get("severity")
         title = _clean_text(finding.get("title"), 160)
         body = _clean_text(finding.get("body"), 1_000)
         if not isinstance(path, str) or not isinstance(line, int) or isinstance(line, bool):
             continue
-        if category not in _FINDING_CATEGORIES:
+        if side not in {"LEFT", "RIGHT"} or category not in _FINDING_CATEGORIES:
             continue
-        if severity not in _SEVERITY_ORDER or line not in valid_lines.get(path, set()):
+        if severity not in _SEVERITY_ORDER or line not in valid_lines.get(path, {}).get(side, set()):
             continue
-        if not title or not body or (path, line) in seen_locations:
+        if category == "compatibility" and severity == "suggestion":
+            severity = "warning"
+        if not title or not body or (path, side, line) in seen_locations:
             continue
-        seen_locations.add((path, line))
+        seen_locations.add((path, side, line))
         validated.append(
             {
                 "path": path,
                 "line": line,
+                "side": side,
                 "category": category,
                 "severity": severity,
                 "title": title,
@@ -1485,7 +1580,14 @@ def _validate_findings(findings: Any, valid_lines: dict[str, set[int]]) -> list[
                 "suggestion": "",
             }
         )
-    validated.sort(key=lambda finding: (_SEVERITY_ORDER[finding["severity"]], finding["path"], finding["line"]))
+    validated.sort(
+        key=lambda finding: (
+            _SEVERITY_ORDER[finding["severity"]],
+            finding["path"],
+            finding["side"],
+            finding["line"],
+        )
+    )
     return validated
 
 
@@ -1506,6 +1608,10 @@ def _build_review_body(
     api_assessment = (
         _clean_text(aggregated.get("api_assessment"), 1_000) or "The review did not return an API assessment."
     )
+    compatibility_assessment = (
+        _clean_text(aggregated.get("compatibility_assessment"), 1_000)
+        or "The review did not return a compatibility and deprecation assessment."
+    )
     implementation_assessment = (
         _clean_text(aggregated.get("implementation_assessment"), 1_000)
         or "The review did not return an implementation assessment."
@@ -1520,6 +1626,8 @@ def _build_review_body(
     verdict = aggregated.get("verdict")
     if verdict not in _VERDICTS:
         verdict = "Minor fixes needed" if findings else "No blocking issues"
+    elif findings and verdict == "No blocking issues":
+        verdict = "Minor fixes needed"
 
     if findings:
         action = "Would post" if preview else "Posted"
@@ -1540,6 +1648,7 @@ def _build_review_body(
 
 - **Design and architecture:** {design_architecture}
 - **API:** {api_assessment}
+- **Compatibility and deprecation:** {compatibility_assessment}
 - **Implementation:** {implementation_assessment}
 - **Style consistency:** {style_assessment}
 - **Test quality:** {test_assessment}
@@ -1565,7 +1674,10 @@ def _publish_or_preview(
         print(f"\n--- Proposed review for {repository}#{pull_request_number} at {head_sha[:12]} ---\n", flush=True)
         print(body, flush=True)
         for comment in _build_inline_comments(findings):
-            print(f"\n--- Proposed inline comment at {comment['path']}:{comment['line']} ---\n", flush=True)
+            print(
+                f"\n--- Proposed inline comment at {comment['path']}:{comment['line']} ({comment['side']}) ---\n",
+                flush=True,
+            )
             print(comment["body"], flush=True)
         _progress("Dry run complete; no GitHub review was posted.")
         return ReviewStatus.PREVIEWED
@@ -1617,7 +1729,7 @@ def _build_inline_comments(findings: list[dict[str, Any]]) -> list[dict[str, Any
             {
                 "path": finding["path"],
                 "line": finding["line"],
-                "side": "RIGHT",
+                "side": finding["side"],
                 "body": comment_body,
             }
         )

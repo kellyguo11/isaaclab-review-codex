@@ -30,7 +30,7 @@ def _load_review_module() -> ModuleType:
 
 
 def test_changed_right_lines_tracks_additions_across_hunks() -> None:
-    """Added right-side lines should be recovered from every diff hunk."""
+    """Changed left- and right-side lines should be recovered from every diff hunk."""
     reviewer = _load_review_module()
     patch = """@@ -10,4 +10,5 @@ def update():
  context
@@ -43,6 +43,7 @@ def test_changed_right_lines_tracks_additions_across_hunks() -> None:
 +return new
 """
 
+    assert reviewer._changed_diff_lines(patch) == ({11, 30}, {11, 12, 31})
     assert reviewer._changed_right_lines(patch) == {11, 12, 31}
     assert reviewer._format_line_ranges({11, 12, 31}) == "11-12,31"
 
@@ -100,6 +101,8 @@ def test_review_context_preserves_complete_patch_and_changed_line_excerpts(monke
 
     assert serialized["files"][0]["patch"] == patch
     assert "90: new value" in serialized["files"][0]["current_file"]
+    assert serialized["files"][0]["valid_added_line_ranges"] == "90"
+    assert serialized["files"][0]["valid_deleted_line_ranges"] == "89"
     assert serialized["repository_instructions"] == "Trusted instructions"
     assert serialized["contribution_guidance"] == "Trusted instructions"
     assert serialized["test_audit_guidance"] == "Trusted instructions"
@@ -227,9 +230,12 @@ def test_validate_findings_filters_invalid_locations_and_duplicates() -> None:
         },
     ]
 
-    validated = reviewer._validate_findings(findings, {"source/example.py": {8, 10}})
+    validated = reviewer._validate_findings(
+        findings,
+        {"source/example.py": {"LEFT": set(), "RIGHT": {8, 10}}},
+    )
 
-    assert validated == [{**findings[0], "suggestion": ""}]
+    assert validated == [{**findings[0], "side": "RIGHT", "suggestion": ""}]
 
 
 def test_validate_findings_has_no_numeric_cap() -> None:
@@ -248,9 +254,12 @@ def test_validate_findings_has_no_numeric_cap() -> None:
         for line in range(1, 6)
     ]
 
-    validated = reviewer._validate_findings(findings, {"source/example.py": set(range(1, 6))})
+    validated = reviewer._validate_findings(
+        findings,
+        {"source/example.py": {"LEFT": set(), "RIGHT": set(range(1, 6))}},
+    )
 
-    assert validated == findings
+    assert validated == [{**finding, "side": "RIGHT"} for finding in findings]
 
 
 def test_validate_findings_accepts_style_and_test_quality_categories() -> None:
@@ -277,13 +286,36 @@ def test_validate_findings_accepts_style_and_test_quality_categories() -> None:
         },
     ]
 
-    assert (
-        reviewer._validate_findings(
-            findings,
-            {"source/example.py": {4}, "source/test_example.py": {9}},
-        )
-        == findings
+    assert reviewer._validate_findings(
+        findings,
+        {
+            "source/example.py": {"LEFT": set(), "RIGHT": {4}},
+            "source/test_example.py": {"LEFT": set(), "RIGHT": {9}},
+        },
+    ) == [{**finding, "side": "RIGHT"} for finding in findings]
+
+
+def test_validate_findings_accepts_breaking_change_on_deleted_line() -> None:
+    """A removed public contract should remain commentable on the diff's left side."""
+    reviewer = _load_review_module()
+    finding = {
+        "path": "source/public_api.py",
+        "line": 12,
+        "side": "LEFT",
+        "category": "compatibility",
+        "severity": "suggestion",
+        "title": "Public API removed without deprecation",
+        "body": "The exported function is deleted without retaining a warning shim for the deprecation cycle.",
+        "suggestion": "",
+    }
+
+    validated = reviewer._validate_findings(
+        [finding],
+        {"source/public_api.py": {"LEFT": {12}, "RIGHT": set()}},
     )
+
+    assert validated == [{**finding, "severity": "warning"}]
+    assert reviewer._build_inline_comments(validated)[0]["side"] == "LEFT"
 
 
 def test_extract_chat_completion_output_parses_json_content() -> None:
@@ -391,6 +423,12 @@ def test_specialist_ensemble_runs_every_role_on_every_model(monkeypatch) -> None
     instructions = {role: role_instructions for role, role_instructions, _, _, _ in calls}
     assert "coordinate-basis" in instructions["design_architecture"]
     assert "internal zero-copy wrapper escaping" in instructions["api_contract"]
+    assert (
+        "Classify every directly evidenced incompatible change as category compatibility"
+        in instructions["api_contract"]
+    )
+    assert "A release note, changelog entry" in instructions["api_contract"]
+    assert "old entry point or behavior to remain functional" in instructions["api_contract"]
     assert "still-fresh stale source" in instructions["implementation_quality"]
     assert "documentation includes" in instructions["implementation_quality"]
     assert "changelog fragments for every touched package" in instructions["implementation_quality"]
@@ -442,6 +480,9 @@ def test_specialist_prompt_requires_adversarial_review_before_no_findings(monkey
     assert "test_audit_guidance" in prompt
     assert "style, formatting, naming" in prompt
     assert "audit every added test case" in prompt
+    assert "Build an explicit compatibility ledger" in prompt
+    assert "valid_deleted_line_ranges (LEFT)" in prompt
+    assert "A changelog, migration note, major-version claim" in prompt
 
 
 def test_aggregation_prompt_rechecks_every_file_before_no_findings(monkeypatch) -> None:
@@ -455,6 +496,7 @@ def test_aggregation_prompt_rechecks_every_file_before_no_findings(monkeypatch) 
             "summary": "The generator change keeps discovery template-driven.",
             "design_architecture": "The new template follows the existing generator boundary.",
             "api_assessment": "Existing algorithm names and CLI inputs remain accepted.",
+            "compatibility_assessment": "Breaking changes: none identified. Existing contracts remain available.",
             "implementation_assessment": "Template discovery and rendering paths remain aligned.",
             "style_assessment": "The templates follow the adjacent naming and typing patterns.",
             "test_assessment": "No tests were added or changed.",
@@ -480,10 +522,15 @@ def test_aggregation_prompt_rechecks_every_file_before_no_findings(monkeypatch) 
     assert "Hydra or preset forwarding" in prompt
     assert "actively try to falsify" in prompt
     assert "broken by an added line" in prompt
-    assert "summary and all five assessments must remain useful" in prompt
-    assert "style and test audits are deliberately picky" in prompt
+    assert "summary and all six assessments must remain useful" in prompt
+    assert "main, style, and test audits are deliberately picky" in prompt
     assert "Every added or changed test passes the test-audit authoring gate" in prompt
     assert "does not duplicate existing tests" in prompt
+    assert "Every incompatible change" in prompt
+    assert "old-versus-new compatibility ledger" in prompt
+    assert "all six assessments" in prompt
+    assert "Breaking changes: none identified." in prompt
+    assert "valid_deleted_line_ranges (LEFT)" in prompt
     assert '"No blocking issues"' in prompt
 
 
@@ -495,6 +542,7 @@ def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -
         {
             "path": "source/example.py",
             "line": 8,
+            "side": "RIGHT",
             "category": "api",
             "severity": "warning",
             "title": "Breaks the public contract",
@@ -504,6 +552,7 @@ def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -
         {
             "path": "source/example.py",
             "line": 12,
+            "side": "RIGHT",
             "category": "implementation",
             "severity": "suggestion",
             "title": "Optional cleanup",
@@ -515,6 +564,7 @@ def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -
         "summary": "Two concerns.",
         "design_architecture": "No material concerns.",
         "api_assessment": "One API concern.",
+        "compatibility_assessment": "Breaking changes: the public return contract changed without deprecation.",
         "implementation_assessment": "One implementation concern.",
         "style_assessment": "One style concern.",
         "test_assessment": "No tests changed.",
@@ -536,6 +586,7 @@ def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -
             "summary": "One demonstrated API concern.",
             "design_architecture": "No material concerns.",
             "api_assessment": "The return contract is broken.",
+            "compatibility_assessment": "Breaking changes: the return type changed without a deprecation bridge.",
             "implementation_assessment": "No material concerns.",
             "style_assessment": "No demonstrated style violation.",
             "test_assessment": "No tests changed.",
@@ -564,6 +615,9 @@ def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -
     assert "maintainability concern that warrants maintainer action" in prompt
     assert "do not raise the bar" in prompt
     assert "Do not reject a finding merely because it is style-only or test-only" in prompt
+    assert "LEFT-side findings on deleted lines" in prompt
+    assert "old-contract-functional" in prompt
+    assert "all six assessments" in prompt
     assert "preserve useful" in prompt
     assert "PR-specific feedback" in prompt
     assert captured["output_schema"] == reviewer._critic_schema()
@@ -581,6 +635,7 @@ def test_prepublication_critic_preserves_specific_feedback_without_findings(monk
             "summary": "The template remains the source of truth for RSL-RL algorithm discovery.",
             "design_architecture": "The new distillation template stays within the existing generator boundary.",
             "api_assessment": "Existing PPO names and CLI inputs remain accepted.",
+            "compatibility_assessment": "Breaking changes: none identified. Existing contracts remain available.",
             "implementation_assessment": "Discovery, rendering, and generated config naming were traced together.",
             "style_assessment": "The template follows adjacent naming and structure.",
             "test_assessment": "No tests were added or changed.",
@@ -596,6 +651,7 @@ def test_prepublication_critic_preserves_specific_feedback_without_findings(monk
             "summary": "One candidate concern.",
             "design_architecture": "Review the template boundary.",
             "api_assessment": "Review the CLI contract.",
+            "compatibility_assessment": "Review the compatibility ledger.",
             "implementation_assessment": "Review discovery and rendering.",
             "style_assessment": "Review adjacent style.",
             "test_assessment": "Review changed tests.",
@@ -610,6 +666,7 @@ def test_prepublication_critic_preserves_specific_feedback_without_findings(monk
         "summary": "The template remains the source of truth for RSL-RL algorithm discovery.",
         "design_architecture": "The new distillation template stays within the existing generator boundary.",
         "api_assessment": "Existing PPO names and CLI inputs remain accepted.",
+        "compatibility_assessment": "Breaking changes: none identified. Existing contracts remain available.",
         "implementation_assessment": "Discovery, rendering, and generated config naming were traced together.",
         "style_assessment": "The template follows adjacent naming and structure.",
         "test_assessment": "No tests were added or changed.",
@@ -645,6 +702,7 @@ def test_review_body_keeps_specific_feedback_without_inline_findings() -> None:
             "summary": "The template remains the source of truth for RSL-RL algorithm discovery.",
             "design_architecture": "The new template follows the existing generator boundary.",
             "api_assessment": "Existing algorithm names and CLI inputs remain accepted.",
+            "compatibility_assessment": "Breaking changes: none identified. Existing contracts remain available.",
             "implementation_assessment": "Discovery, rendering, and config naming were traced together.",
             "style_assessment": "The template follows adjacent naming and structure.",
             "test_assessment": "No tests were added or changed.",
@@ -656,6 +714,7 @@ def test_review_body_keeps_specific_feedback_without_inline_findings() -> None:
     )
 
     assert "The template remains the source of truth" in body
+    assert "**Compatibility and deprecation:** Breaking changes: none identified." in body
     assert "**Style consistency:** The template follows adjacent naming and structure." in body
     assert "**Test quality:** No tests were added or changed." in body
     assert "**No blocking issues.**" in body
@@ -663,6 +722,41 @@ def test_review_body_keeps_specific_feedback_without_inline_findings() -> None:
     assert "No material issues were identified" not in body
     assert "No material concerns" not in body
     assert "_Automated review; human maintainers own approval decisions._" in body
+
+
+def test_review_body_does_not_call_actionable_findings_non_blocking() -> None:
+    """A retained finding should not be presented as a no-blocking-issues result."""
+    reviewer = _load_review_module()
+
+    body = reviewer._build_review_body(
+        {
+            "summary": "A public contract was removed.",
+            "design_architecture": "The module boundary is otherwise unchanged.",
+            "api_assessment": "The old entry point is no longer available.",
+            "compatibility_assessment": "Breaking changes: the entry point was removed without deprecation.",
+            "implementation_assessment": "The replacement path is internally coherent.",
+            "style_assessment": "The replacement follows local style.",
+            "test_assessment": "No tests were added or changed.",
+            "verdict": "No blocking issues",
+        },
+        [
+            {
+                "path": "source/public_api.py",
+                "line": 12,
+                "side": "LEFT",
+                "category": "compatibility",
+                "severity": "warning",
+                "title": "Public API removed without deprecation",
+                "body": "The old entry point was removed immediately.",
+                "suggestion": "",
+            }
+        ],
+        "<!-- marker -->",
+        context_truncated=False,
+    )
+
+    assert "**Minor fixes needed.**" in body
+    assert "**No blocking issues.**" not in body
 
 
 def test_existing_review_requires_bot_login_and_matching_sha(monkeypatch) -> None:
@@ -717,6 +811,7 @@ def test_post_review_always_uses_comment_event(monkeypatch) -> None:
     finding = {
         "path": "source/example.py",
         "line": 8,
+        "side": "RIGHT",
         "category": "implementation",
         "severity": "critical",
         "title": "Incorrect reset",
@@ -757,6 +852,7 @@ def test_dry_run_prints_preview_without_posting(monkeypatch, capsys) -> None:
     finding = {
         "path": "source/example.py",
         "line": 8,
+        "side": "RIGHT",
         "category": "implementation",
         "severity": "warning",
         "title": "Incorrect reset",

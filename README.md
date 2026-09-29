@@ -13,6 +13,14 @@ Every pull request is reviewed by a two-model ensemble:
 
 Each model independently runs five specialist passes: design and architecture,
 API contracts, implementation quality, style consistency, and test quality.
+The three main passes use a skeptical maintainer standard: they compare deleted
+behavior with its replacement line by line, trace boundary and failure paths,
+and report directly evidenced semantic, integration, architectural, API, and
+maintainability defects even when they do not produce an immediate crash.
+The API pass builds an old-versus-new compatibility ledger for every touched
+contract, including import paths, signatures, defaults, runtime types, shapes,
+units, ordering, configuration keys, CLI flags, registry IDs, exceptions,
+side effects, and serialized forms.
 The style pass deliberately applies the current Isaac Lab contribution guide
 and adjacent code patterns strictly, including small consistency and
 maintainability issues. The test pass applies the repository's `test-audit`
@@ -54,9 +62,17 @@ logging preferences, optional hardening, alternative designs, and unsupported
 personal preferences. Exact formatting, naming, typing, documentation, local
 style, and test-value violations are intentionally reportable even when their
 appropriate severity is only a suggestion. An unchanged downstream consumer
-broken by an added line is considered introduced by the PR and remains
-reportable. Deterministic contract, repository-rule, style,
-documentation-integration, test-audit, type, and producer/consumer failures do
+broken by an added or deleted line is considered introduced by the PR and remains
+reportable. Breaking changes are highlighted in a dedicated compatibility and
+deprecation assessment and are warnings at minimum when they lack a transition.
+A changelog, migration note, major-version claim, or replacement API alone does
+not count as a deprecation cycle: the old contract must remain functional for
+the repository-prescribed window, use the established targeted warning with
+replacement and removal guidance, document migration, and cover both paths
+during the transition. The bot can anchor removal findings directly to deleted
+lines instead of dropping deletion-only API breaks. Deterministic contract,
+repository-rule, style, documentation-integration, test-audit, type, and
+producer/consumer failures do
 not require a runtime reproduction or a specific external caller to be
 reported. The bot posts concise explanatory comments and does not generate
 GitHub replacement-code suggestion blocks.
