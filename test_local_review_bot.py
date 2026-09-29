@@ -52,6 +52,7 @@ def _configuration(local_bot, tmp_path: Path):
         private_key_path=tmp_path / "private-key.pem",
         inference_api_key="nvidia-key",
         review_models=("opus-test", "gpt-test"),
+        max_concurrent_model_requests=10,
     )
 
 
@@ -97,6 +98,21 @@ def test_configuration_uses_nvidia_inference_models(monkeypatch, tmp_path) -> No
         "azure/anthropic/claude-opus-5",
         "azure/openai/gpt-5.6-sol",
     )
+    assert configuration.max_concurrent_model_requests == 10
+
+
+def test_configuration_accepts_bounded_model_concurrency(monkeypatch, tmp_path) -> None:
+    """Specialist concurrency should be configurable without exceeding the request count."""
+    local_bot = _load_local_bot()
+    monkeypatch.setenv("ISAACLAB_REVIEW_APP_PRIVATE_KEY_PATH", str(tmp_path / "app.pem"))
+    monkeypatch.setenv("NVIDIA_INFERENCE_API_KEY", "nvidia-key")
+    monkeypatch.setenv("NVIDIA_REVIEW_MAX_CONCURRENT_REQUESTS", "6")
+
+    assert local_bot._load_configuration().max_concurrent_model_requests == 6
+
+    monkeypatch.setenv("NVIDIA_REVIEW_MAX_CONCURRENT_REQUESTS", "11")
+    with pytest.raises(RuntimeError, match="must be between 1 and 10"):
+        local_bot._load_configuration()
 
 
 def test_create_app_jwt_uses_expected_claims_and_rs256(monkeypatch, tmp_path) -> None:
@@ -169,6 +185,39 @@ def test_token_provider_requests_one_repository_and_read_only_permissions(monkey
         },
     )
     assert stat.S_IMODE(private_key_path.stat().st_mode) == 0o600
+
+
+def test_write_token_includes_issue_reaction_permission(monkeypatch, tmp_path) -> None:
+    """A posting token should be able to acknowledge review starts on PR comments."""
+    local_bot = _load_local_bot()
+    private_key_path = tmp_path / "app.pem"
+    private_key_path.write_text("private key fixture", encoding="utf-8")
+    private_key_path.chmod(0o600)
+    calls = []
+
+    monkeypatch.setattr(local_bot, "_create_app_jwt", lambda client_id, key_path: "app-jwt")
+
+    def fake_github_app_json(path, token, method="GET", payload=None):
+        calls.append((path, token, method, payload))
+        if path == "/app":
+            return {"slug": "isaaclab-review-bot"}
+        if path.endswith("/installation"):
+            return {"id": 123}
+        return {
+            "token": "installation-token",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "permissions": {"contents": "read", "issues": "write", "pull_requests": "write"},
+        }
+
+    monkeypatch.setattr(local_bot, "_github_app_json", fake_github_app_json)
+    monkeypatch.setattr(local_bot.automated_review, "_verify_installation_token", lambda repository, token: None)
+    provider = local_bot.GitHubAppTokenProvider("isaac-sim/IsaacLab", "client-id", private_key_path)
+
+    assert provider.get_token(write=True) == "installation-token"
+    assert calls[-1][3] == {
+        "repositories": ["IsaacLab"],
+        "permissions": {"contents": "read", "issues": "write", "pull_requests": "write"},
+    }
 
 
 def test_token_provider_rejects_a_different_github_app(monkeypatch, tmp_path) -> None:
@@ -262,8 +311,8 @@ def test_poll_reviews_new_pull_request_once_and_preserves_prior_state(monkeypatc
     )
     reviews = []
 
-    def fake_review(repository, number, token, api_key, models):
-        reviews.append((repository, number, token, api_key, models))
+    def fake_review(repository, number, token, api_key, models, max_concurrent_model_requests):
+        reviews.append((repository, number, token, api_key, models, max_concurrent_model_requests))
         return local_bot.automated_review.ReviewStatus.POSTED
 
     monkeypatch.setattr(local_bot.automated_review, "review_pull_request", fake_review)
@@ -273,7 +322,7 @@ def test_poll_reviews_new_pull_request_once_and_preserves_prior_state(monkeypatc
     assert not initialized
     assert token_requests == [False, True]
     assert reviews == [
-        ("isaac-sim/IsaacLab", 20, "write-token", "nvidia-key", ("opus-test", "gpt-test")),
+        ("isaac-sim/IsaacLab", 20, "write-token", "nvidia-key", ("opus-test", "gpt-test"), 10),
     ]
     assert local_bot._load_state(state_file, configuration.repository) == {
         10: "initial-head",
@@ -383,8 +432,26 @@ def test_pr_author_command_reviews_current_head_once(monkeypatch, tmp_path) -> N
     )
     reviews = []
 
-    def fake_review(repository, number, token, api_key, models):
-        reviews.append((repository, number, token, api_key, models))
+    def fake_review(
+        repository,
+        number,
+        token,
+        api_key,
+        models,
+        max_concurrent_model_requests,
+        acknowledgement_comment_id,
+    ):
+        reviews.append(
+            (
+                repository,
+                number,
+                token,
+                api_key,
+                models,
+                max_concurrent_model_requests,
+                acknowledgement_comment_id,
+            )
+        )
         return local_bot.automated_review.ReviewStatus.POSTED
 
     monkeypatch.setattr(local_bot.automated_review, "review_pull_request", fake_review)
@@ -393,7 +460,7 @@ def test_pr_author_command_reviews_current_head_once(monkeypatch, tmp_path) -> N
 
     assert token_requests == [False, True]
     assert reviews == [
-        ("isaac-sim/IsaacLab", 20, "write-token", "nvidia-key", ("opus-test", "gpt-test")),
+        ("isaac-sim/IsaacLab", 20, "write-token", "nvidia-key", ("opus-test", "gpt-test"), 10, 123),
     ]
     state = local_bot._load_command_state(command_state_file, configuration.repository)
     assert state is not None

@@ -34,6 +34,10 @@ need fixing; Opus handles this verification if GPT is unavailable. The verifier
 can accept or reject existing candidate IDs but cannot invent or relocate
 findings. A normal review therefore makes twelve NVIDIA inference requests. If
 verification fails with both models, nothing is posted.
+All ten specialist requests run concurrently by default, reducing that stage
+from four waves to one while preserving every role and both ensemble models.
+Aggregation and pre-publication verification remain sequential because each
+depends on the preceding result.
 Each request allows up to 65,536 output tokens so reasoning models have enough
 budget to produce their final structured answer.
 
@@ -125,12 +129,17 @@ Runtime code itself uses only the Python standard library.
 Configure `isaaclab-review-bot` with these repository permissions:
 
 - Contents: read
+- Issues: read and write
 - Pull requests: read and write
 
-The Pull requests permission also allows the App to read PR conversation
-comments through GitHub's
-[shared issue-comments endpoint](https://docs.github.com/en/rest/issues/comments#list-issue-comments-for-a-repository).
-No Issues permission or user authorization is required.
+The Pull requests permission allows the App to read PR conversation comments
+through GitHub's shared issue-comments endpoint. Issues write access is used
+only to add an eyes reaction when a review starts. No user authorization is
+required.
+
+For an existing installation, add **Issues: Read and write** in the GitHub
+App's repository permissions, save the App settings, and approve the requested
+permission change for the `isaac-sim` installation before restarting the bot.
 
 Install it with **Only select repositories** and select only
 `isaac-sim/IsaacLab`. Do not enable user authorization and do not create a
@@ -166,11 +175,15 @@ GITHUB_REPOSITORY=isaac-sim/IsaacLab
 NVIDIA_INFERENCE_API_KEY=<PASTE-THE-NVIDIA-KEY-HERE>
 NVIDIA_REVIEW_MODEL=azure/anthropic/claude-opus-5
 NVIDIA_REVIEW_FALLBACK_MODEL=azure/openai/gpt-5.6-sol
+NVIDIA_REVIEW_MAX_CONCURRENT_REQUESTS=10
 ```
 
 Despite its legacy name, `NVIDIA_REVIEW_FALLBACK_MODEL` is always used as the
 second ensemble reviewer. It is also the fallback for final aggregation when
 the primary model fails and the first-choice pre-publication verifier.
+`NVIDIA_REVIEW_MAX_CONCURRENT_REQUESTS` accepts `1` through `10`. The default
+of `10` starts all specialist requests in one wave. Reduce it if the NVIDIA
+endpoint consistently returns rate-limit responses.
 
 Do not put quotes around values unless a path contains spaces. Do not commit
 this environment file or paste either private key into an issue, pull request,
@@ -280,10 +293,14 @@ conversation comment:
 ```
 
 `/isaaclab-review` is also accepted. The watcher sees the command on its next
-poll and reviews the PR's current head. Put the command in a normal PR
+poll, immediately adds an 👀 reaction to the accepted command, and reviews the
+PR's current head. Put the command in a normal PR
 conversation comment, not an inline code-review comment. A command for a head
 the bot already reviewed is acknowledged in the local log and skipped before
 inference, preventing duplicate reviews and model spend.
+
+For a new PR reviewed automatically, the bot adds the 👀 reaction to the pull
+request itself before starting model inference.
 
 The bot verifies effective access with GitHub's repository-permission endpoint.
 It does not use the comment's coarse `author_association` label, which may say

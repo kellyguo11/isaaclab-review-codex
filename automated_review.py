@@ -44,7 +44,8 @@ _CONTEXT_ENCODING_MARGIN_CHARS = 150_000
 _PATCH_CONTEXT_SHARE = 0.7
 _CHANGED_LINE_CONTEXT_RADIUS = 40
 _MAX_MODEL_OUTPUT_TOKENS = 65_536
-_MAX_CONCURRENT_MODEL_REQUESTS = 3
+_DEFAULT_MAX_CONCURRENT_MODEL_REQUESTS = 10
+_MAX_SPECIALIST_REQUESTS = 10
 _PROGRESS_HEARTBEAT_SECONDS = 30
 _REQUEST_TIMEOUT_SECONDS = 600
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
@@ -113,6 +114,8 @@ def review_pull_request(
     inference_api_key: str,
     models: tuple[str, ...] = (_DEFAULT_MODEL, _DEFAULT_ENSEMBLE_MODEL),
     dry_run: bool = False,
+    max_concurrent_model_requests: int = _DEFAULT_MAX_CONCURRENT_MODEL_REQUESTS,
+    acknowledgement_comment_id: int | None = None,
 ) -> ReviewStatus:
     """Review one pull request using a repository-scoped installation token.
 
@@ -123,6 +126,9 @@ def review_pull_request(
         inference_api_key: NVIDIA inference API key used for model requests.
         models: NVIDIA inference models that independently review the pull request.
         dry_run: Print the proposed review without posting it.
+        max_concurrent_model_requests: Maximum simultaneous specialist model requests.
+        acknowledgement_comment_id: PR conversation comment to acknowledge with an eyes reaction.
+            When omitted, a posted review reacts to the pull request itself.
 
     Returns:
         Terminal status of the review attempt.
@@ -130,12 +136,17 @@ def review_pull_request(
     Raises:
         RuntimeError: If the GitHub credential is not a repository-scoped App
             installation token or an API request fails.
-        ValueError: If ``pull_request_number`` is not positive.
+        ValueError: If ``pull_request_number`` or model concurrency is outside its accepted range.
     """
     if pull_request_number <= 0:
         raise ValueError(f"Invalid pull-request number: {pull_request_number}.")
     if len(set(models)) < 2 or any(not model for model in models):
         raise ValueError("At least two distinct, non-empty review models are required.")
+    if not 1 <= max_concurrent_model_requests <= _MAX_SPECIALIST_REQUESTS:
+        raise ValueError(
+            f"max_concurrent_model_requests must be between 1 and {_MAX_SPECIALIST_REQUESTS}, "
+            f"not {max_concurrent_model_requests}."
+        )
     mode = "dry run" if dry_run else "posting review"
     _progress(f"PR #{pull_request_number}: starting {mode} with models: {', '.join(models)}.")
     _progress(f"PR #{pull_request_number}: verifying repository-scoped GitHub App access.")
@@ -166,6 +177,14 @@ def review_pull_request(
         _progress(f"PR #{pull_request_number} has no changed files; skipping.")
         return ReviewStatus.SKIPPED
 
+    if not dry_run:
+        _add_review_start_reaction(
+            repository,
+            pull_request_number,
+            github_token,
+            comment_id=acknowledgement_comment_id,
+        )
+
     _progress(f"PR #{pull_request_number}: building review context from {len(changed_files)} changed files.")
     review_input = _build_review_input(repository, pull_request, changed_files, github_token)
     if review_input.patches_truncated:
@@ -177,7 +196,12 @@ def review_pull_request(
     _progress(
         f"PR #{pull_request_number}: context ready, {len(review_input.serialized):,} characters ({context_status})."
     )
-    specialist_results = _run_specialist_reviews(review_input.serialized, models, inference_api_key)
+    specialist_results = _run_specialist_reviews(
+        review_input.serialized,
+        models,
+        inference_api_key,
+        max_concurrent_requests=max_concurrent_model_requests,
+    )
     _progress(f"PR #{pull_request_number}: aggregating {len(specialist_results)} successful specialist results.")
     aggregated = _aggregate_reviews(
         review_input.serialized,
@@ -268,6 +292,27 @@ def _github_paginate(path: str, token: str) -> list[dict[str, Any]]:
         if len(page_items) < 100:
             break
     return items
+
+
+def _add_review_start_reaction(
+    repository: str,
+    pull_request_number: int,
+    github_token: str,
+    comment_id: int | None = None,
+) -> None:
+    """Acknowledge a started review with an eyes reaction."""
+    if comment_id is None:
+        path = f"/repos/{repository}/issues/{pull_request_number}/reactions"
+        target = f"PR #{pull_request_number}"
+    else:
+        path = f"/repos/{repository}/issues/comments/{comment_id}/reactions"
+        target = f"review command {comment_id} on PR #{pull_request_number}"
+    try:
+        _github_json(path, github_token, method="POST", payload={"content": "eyes"})
+    except Exception as error:
+        _progress(f"Warning: could not add eyes reaction to {target}: {error}", error=True)
+        return
+    _progress(f"Added eyes reaction to {target}; review is in progress.")
 
 
 def _request_json(
@@ -789,6 +834,7 @@ def _run_specialist_reviews(
     review_input: str,
     models: tuple[str, ...],
     api_key: str,
+    max_concurrent_requests: int = _DEFAULT_MAX_CONCURRENT_MODEL_REQUESTS,
 ) -> list[dict[str, Any]]:
     """Run every specialist pass on every ensemble model."""
     roles = {
@@ -871,13 +917,11 @@ def _run_specialist_reviews(
     }
     results: list[dict[str, Any]] = []
     request_count = len(roles) * len(models)
+    worker_count = min(max_concurrent_requests, request_count)
     _progress(
-        f"Starting {request_count} specialist requests across {len(models)} models "
-        f"(up to {_MAX_CONCURRENT_MODEL_REQUESTS} concurrent)."
+        f"Starting {request_count} specialist requests across {len(models)} models (up to {worker_count} concurrent)."
     )
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=min(_MAX_CONCURRENT_MODEL_REQUESTS, request_count)
-    ) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = {
             executor.submit(
                 _run_review_pass_with_progress,

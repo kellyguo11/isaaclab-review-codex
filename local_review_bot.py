@@ -31,6 +31,7 @@ _EXPECTED_APP_SLUG = "isaaclab-review-bot"
 _REVIEW_COMMANDS = frozenset({"@isaaclab-review-bot review", "/isaaclab-review"})
 _TRUSTED_REPOSITORY_PERMISSIONS = frozenset({"write", "maintain", "admin"})
 _DEFAULT_POLL_INTERVAL_SECONDS = 60
+_DEFAULT_MAX_CONCURRENT_MODEL_REQUESTS = 10
 _COMMENT_CURSOR_OVERLAP_SECONDS = 2
 _MAX_PROCESSED_COMMANDS = 10_000
 _TOKEN_REFRESH_BUFFER_SECONDS = 300
@@ -59,6 +60,7 @@ class BotConfiguration:
     private_key_path: Path
     inference_api_key: str
     review_models: tuple[str, ...]
+    max_concurrent_model_requests: int
 
 
 @dataclass(frozen=True)
@@ -130,16 +132,19 @@ class GitHubAppTokenProvider:
         automated_review._progress(f"Found the GitHub App installation on {self._repository}.")
 
         pull_request_access = "write" if write else "read"
+        permissions = {
+            "contents": "read",
+            "pull_requests": pull_request_access,
+        }
+        if write:
+            permissions["issues"] = "write"
         response = _github_app_json(
             f"/app/installations/{installation['id']}/access_tokens",
             app_jwt,
             method="POST",
             payload={
                 "repositories": [repository_name],
-                "permissions": {
-                    "contents": "read",
-                    "pull_requests": pull_request_access,
-                },
+                "permissions": permissions,
             },
         )
         if not isinstance(response, dict):
@@ -149,7 +154,12 @@ class GitHubAppTokenProvider:
         permissions = response.get("permissions")
         if not token or not isinstance(permissions, dict):
             raise RuntimeError("GitHub did not return a usable installation token.")
-        if permissions.get("contents") != "read" or permissions.get("pull_requests") != pull_request_access:
+        expected_permissions = {
+            "contents": "read",
+            "pull_requests": pull_request_access,
+            **({"issues": "write"} if write else {}),
+        }
+        if any(permissions.get(name) != access for name, access in expected_permissions.items()):
             raise RuntimeError(f"GitHub returned unexpected installation-token permissions: {permissions}.")
 
         automated_review._verify_installation_token(self._repository, token)
@@ -167,7 +177,8 @@ def main() -> None:
     configuration = _load_configuration()
     automated_review._progress(
         f"Loaded review-bot configuration for {configuration.repository}; models: "
-        f"{', '.join(configuration.review_models)}."
+        f"{', '.join(configuration.review_models)}; specialist concurrency: "
+        f"{configuration.max_concurrent_model_requests}."
     )
     provider = GitHubAppTokenProvider(
         configuration.repository,
@@ -186,6 +197,7 @@ def main() -> None:
             configuration.inference_api_key,
             models=configuration.review_models,
             dry_run=arguments.dry_run,
+            max_concurrent_model_requests=configuration.max_concurrent_model_requests,
         )
         automated_review._progress(f"One-shot review finished with status: {status.value}.")
         return
@@ -256,6 +268,12 @@ def _load_configuration() -> BotConfiguration:
         "NVIDIA_REVIEW_FALLBACK_MODEL",
         automated_review._DEFAULT_ENSEMBLE_MODEL,
     ).strip()
+    max_concurrent_model_requests = _bounded_integer_env(
+        "NVIDIA_REVIEW_MAX_CONCURRENT_REQUESTS",
+        _DEFAULT_MAX_CONCURRENT_MODEL_REQUESTS,
+        minimum=1,
+        maximum=automated_review._MAX_SPECIALIST_REQUESTS,
+    )
     if repository != _DEFAULT_REPOSITORY:
         raise RuntimeError(f"This bot is locked to {_DEFAULT_REPOSITORY}, not {repository}.")
     if client_id != _DEFAULT_CLIENT_ID:
@@ -272,6 +290,7 @@ def _load_configuration() -> BotConfiguration:
         private_key_path=private_key_path,
         inference_api_key=_required_env("NVIDIA_INFERENCE_API_KEY"),
         review_models=review_models,
+        max_concurrent_model_requests=max_concurrent_model_requests,
     )
 
 
@@ -280,6 +299,20 @@ def _required_env(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
         raise RuntimeError(f"Required environment variable {name} is not set.")
+    return value
+
+
+def _bounded_integer_env(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    """Return a bounded integer environment setting."""
+    raw_value = os.environ.get(name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError as error:
+        raise RuntimeError(f"{name} must be an integer between {minimum} and {maximum}.") from error
+    if not minimum <= value <= maximum:
+        raise RuntimeError(f"{name} must be between {minimum} and {maximum}, not {value}.")
     return value
 
 
@@ -442,6 +475,7 @@ def _poll_once(
                 write_token,
                 configuration.inference_api_key,
                 models=configuration.review_models,
+                max_concurrent_model_requests=configuration.max_concurrent_model_requests,
             )
         except Exception as error:
             automated_review._progress(f"Review of PR #{item.number} failed: {error}", error=True)
@@ -534,6 +568,8 @@ def _poll_review_commands(
                 write_token,
                 configuration.inference_api_key,
                 models=configuration.review_models,
+                max_concurrent_model_requests=configuration.max_concurrent_model_requests,
+                acknowledgement_comment_id=comment_id,
             )
         except Exception as error:
             automated_review._progress(

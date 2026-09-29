@@ -442,6 +442,34 @@ def test_specialist_ensemble_runs_every_role_on_every_model(monkeypatch) -> None
     }
 
 
+def test_specialist_ensemble_uses_configured_concurrency(monkeypatch) -> None:
+    """All specialist requests should be able to run in one configured wave."""
+    reviewer = _load_review_module()
+    captured = {}
+    real_executor = reviewer.concurrent.futures.ThreadPoolExecutor
+
+    class RecordingExecutor(real_executor):
+        def __init__(self, max_workers):
+            captured["max_workers"] = max_workers
+            super().__init__(max_workers=max_workers)
+
+    monkeypatch.setattr(reviewer.concurrent.futures, "ThreadPoolExecutor", RecordingExecutor)
+    monkeypatch.setattr(
+        reviewer,
+        "_run_review_pass",
+        lambda role_name, role_instructions, review_input, model, api_key: {"summary": "done", "findings": []},
+    )
+
+    reviewer._run_specialist_reviews(
+        "review-input",
+        ("opus-model", "gpt-model"),
+        "nvidia-key",
+        max_concurrent_requests=10,
+    )
+
+    assert captured["max_workers"] == 10
+
+
 def test_specialist_prompt_requires_adversarial_review_before_no_findings(monkeypatch) -> None:
     """The review prompt should require exhaustive analysis without inviting speculation."""
     reviewer = _load_review_module()
@@ -773,6 +801,31 @@ def test_existing_review_requires_bot_login_and_matching_sha(monkeypatch) -> Non
 
     reviews.append({"user": {"login": "isaaclab-review-bot[bot]"}, "body": marker})
     assert reviewer._has_existing_review("isaac-sim/IsaacLab", 10, marker, "token")
+
+
+def test_review_start_reacts_to_command_or_pull_request(monkeypatch) -> None:
+    """A started review should acknowledge its command, or the PR for an automatic run."""
+    reviewer = _load_review_module()
+    calls = []
+
+    def fake_github_json(path, token, method="GET", payload=None):
+        calls.append((path, token, method, payload))
+        return {"content": "eyes"}
+
+    monkeypatch.setattr(reviewer, "_github_json", fake_github_json)
+
+    reviewer._add_review_start_reaction("isaac-sim/IsaacLab", 20, "app-token", comment_id=123)
+    reviewer._add_review_start_reaction("isaac-sim/IsaacLab", 21, "app-token")
+
+    assert calls == [
+        (
+            "/repos/isaac-sim/IsaacLab/issues/comments/123/reactions",
+            "app-token",
+            "POST",
+            {"content": "eyes"},
+        ),
+        ("/repos/isaac-sim/IsaacLab/issues/21/reactions", "app-token", "POST", {"content": "eyes"}),
+    ]
 
 
 def test_fetch_raw_file_refuses_non_github_hosts() -> None:
