@@ -100,9 +100,80 @@ def test_review_context_preserves_complete_patch_and_changed_line_excerpts(monke
 
     assert serialized["files"][0]["patch"] == patch
     assert "90: new value" in serialized["files"][0]["current_file"]
+    assert serialized["repository_instructions"] == "Trusted instructions"
+    assert serialized["contribution_guidance"] == "Trusted instructions"
+    assert serialized["test_audit_guidance"] == "Trusted instructions"
+    assert serialized["test_audit_context"]["changed_test_files"] == []
     assert serialized["patches_truncated"] is False
     assert review_input.patches_truncated is False
     assert len(review_input.serialized) <= reviewer._MAX_CONTEXT_CHARS
+
+
+def test_review_context_adds_bounded_test_audit_evidence(monkeypatch) -> None:
+    """Changed tests should include full local context and related base-branch tests."""
+    reviewer = _load_review_module()
+    test_path = "source/pkg/test/test_widget.py"
+    patch = "@@ -1,1 +1,2 @@\n existing\n+def test_new_contract(): pass\n"
+    pull_request = {
+        "number": 10,
+        "title": "Add a regression",
+        "body": "",
+        "user": {"login": "author"},
+        "base": {"ref": "develop", "sha": "base-sha"},
+        "head": {"ref": "feature", "sha": "head-sha"},
+    }
+    changed_files = [
+        {
+            "filename": test_path,
+            "status": "modified",
+            "additions": 1,
+            "deletions": 0,
+            "patch": patch,
+            "raw_url": f"https://raw.githubusercontent.com/example/repo/head/{test_path}",
+        }
+    ]
+
+    def fake_repository_file(repository, path, ref, token):
+        files = {
+            "AGENTS.md": "Trusted instructions",
+            "docs/source/refs/contributing.rst": (
+                "Introduction\n============\n\nCoding Style\n------------\nLean code.\n\n"
+                "Unit Testing\n------------\nDistinct tests.\n\nTools\n-----\nRun lint."
+            ),
+            "skills/developer/test-audit/SKILL.md": "Reject duplicate test ownership.",
+            "source/pkg/test/test_widget_existing.py": "def test_existing_contract():\n    assert True\n",
+            "tools/test_settings.py": "TIMEOUTS = {}\n",
+        }
+        return files.get(path, "")
+
+    monkeypatch.setattr(reviewer, "_fetch_repository_file", fake_repository_file)
+    monkeypatch.setattr(
+        reviewer,
+        "_github_json",
+        lambda path, token: {
+            "tree": [
+                {"type": "blob", "path": test_path},
+                {"type": "blob", "path": "source/pkg/test/test_widget_existing.py"},
+                {"type": "blob", "path": "source/other/test/test_other.py"},
+            ],
+            "truncated": False,
+        },
+    )
+    current_test = "def test_existing_contract():\n    assert True\n\ndef test_new_contract():\n    assert True\n"
+    monkeypatch.setattr(reviewer, "_fetch_raw_file", lambda url: (current_test, False))
+
+    review_input = reviewer._build_review_input("example/repo", pull_request, changed_files, "token")
+    serialized = json.loads(review_input.serialized)
+    audit_context = serialized["test_audit_context"]
+
+    assert serialized["contribution_guidance"].startswith("Coding Style")
+    assert "Distinct tests." in serialized["contribution_guidance"]
+    assert "Run lint." not in serialized["contribution_guidance"]
+    assert serialized["test_audit_guidance"] == "Reject duplicate test ownership."
+    assert audit_context["changed_test_files"] == [{"path": test_path, "current_file": current_test, "complete": True}]
+    assert "source/pkg/test/test_widget_existing.py" in audit_context["repository_test_inventory"]
+    assert audit_context["related_existing_tests"][0]["path"] == "source/pkg/test/test_widget_existing.py"
+    assert audit_context["ci_test_routing"] == "TIMEOUTS = {}\n"
 
 
 def test_validate_findings_filters_invalid_locations_and_duplicates() -> None:
@@ -180,6 +251,39 @@ def test_validate_findings_has_no_numeric_cap() -> None:
     validated = reviewer._validate_findings(findings, {"source/example.py": set(range(1, 6))})
 
     assert validated == findings
+
+
+def test_validate_findings_accepts_style_and_test_quality_categories() -> None:
+    """Style and test-audit findings should survive location validation."""
+    reviewer = _load_review_module()
+    findings = [
+        {
+            "path": "source/example.py",
+            "line": 4,
+            "category": "style_consistency",
+            "severity": "suggestion",
+            "title": "Prefer direct attribute access",
+            "body": "The known field is accessed reflectively, unlike the documented local pattern.",
+            "suggestion": "",
+        },
+        {
+            "path": "source/test_example.py",
+            "line": 9,
+            "category": "test_quality",
+            "severity": "suggestion",
+            "title": "Duplicates the owner test",
+            "body": "This repeats the same contract and fixture already covered by the owner-boundary test.",
+            "suggestion": "",
+        },
+    ]
+
+    assert (
+        reviewer._validate_findings(
+            findings,
+            {"source/example.py": {4}, "source/test_example.py": {9}},
+        )
+        == findings
+    )
 
 
 def test_extract_chat_completion_output_parses_json_content() -> None:
@@ -279,11 +383,10 @@ def test_specialist_ensemble_runs_every_role_on_every_model(monkeypatch) -> None
 
     results = reviewer._run_specialist_reviews("review-input", ("opus-model", "gpt-model"), "nvidia-key")
 
-    assert len(results) == 6
+    roles = ("design_architecture", "api_contract", "implementation_quality", "style_consistency", "test_quality")
+    assert len(results) == 10
     assert {(role, model) for role, _, model, _, _ in calls} == {
-        (role, model)
-        for role in ("design_architecture", "api_contract", "implementation_quality")
-        for model in ("opus-model", "gpt-model")
+        (role, model) for role in roles for model in ("opus-model", "gpt-model")
     }
     instructions = {role: role_instructions for role, role_instructions, _, _, _ in calls}
     assert "coordinate-basis" in instructions["design_architecture"]
@@ -292,10 +395,12 @@ def test_specialist_ensemble_runs_every_role_on_every_model(monkeypatch) -> None
     assert "documentation includes" in instructions["implementation_quality"]
     assert "changelog fragments for every touched package" in instructions["implementation_quality"]
     assert "files converted into thin delegates" in instructions["implementation_quality"]
+    assert "new lean-code guidance from PR 8117" in instructions["style_consistency"]
+    assert "direct attribute access" in instructions["style_consistency"]
+    assert "Apply test_audit_guidance in authoring mode" in instructions["test_quality"]
+    assert "duplicate tests" in instructions["test_quality"]
     assert {(result["review_pass"], result["model"]) for result in results} == {
-        (role, model)
-        for role in ("design_architecture", "api_contract", "implementation_quality")
-        for model in ("opus-model", "gpt-model")
+        (role, model) for role in roles for model in ("opus-model", "gpt-model")
     }
 
 
@@ -318,7 +423,7 @@ def test_specialist_prompt_requires_adversarial_review_before_no_findings(monkey
         "key",
     )
 
-    prompt = captured["system_prompt"]
+    prompt = " ".join(captured["system_prompt"].split())
     assert "Zero findings is acceptable only after completing" in prompt
     assert "conservatism is not a substitute for analysis" in prompt
     assert "Do not report hypothetical edge cases" in prompt
@@ -333,6 +438,10 @@ def test_specialist_prompt_requires_adversarial_review_before_no_findings(monkey
     assert "Perform a second adversarial pass" in prompt
     assert "source-inspection test" in prompt
     assert "breaks an unchanged caller" in prompt
+    assert "contribution_guidance" in prompt
+    assert "test_audit_guidance" in prompt
+    assert "style, formatting, naming" in prompt
+    assert "audit every added test case" in prompt
 
 
 def test_aggregation_prompt_rechecks_every_file_before_no_findings(monkeypatch) -> None:
@@ -347,6 +456,8 @@ def test_aggregation_prompt_rechecks_every_file_before_no_findings(monkeypatch) 
             "design_architecture": "The new template follows the existing generator boundary.",
             "api_assessment": "Existing algorithm names and CLI inputs remain accepted.",
             "implementation_assessment": "Template discovery and rendering paths remain aligned.",
+            "style_assessment": "The templates follow the adjacent naming and typing patterns.",
+            "test_assessment": "No tests were added or changed.",
             "verdict": "No blocking issues",
             "findings": [],
         }
@@ -355,11 +466,10 @@ def test_aggregation_prompt_rechecks_every_file_before_no_findings(monkeypatch) 
 
     reviewer._aggregate_reviews("{}", [], ("primary", "fallback"), "key")
 
-    prompt = captured["system_prompt"]
+    prompt = " ".join(captured["system_prompt"].split())
     assert "Precision remains mandatory" in prompt
     assert "Specialist repetition is not proof" in prompt
-    assert "Never turn a test-coverage observation" in prompt
-    assert "into an inline finding" in prompt
+    assert "missing-test or generic test-coverage observation" in prompt
     assert "deterministic compatibility" in prompt
     assert "type-contract failure" in prompt
     assert "new opt-in wrapper API" in prompt
@@ -370,7 +480,10 @@ def test_aggregation_prompt_rechecks_every_file_before_no_findings(monkeypatch) 
     assert "Hydra or preset forwarding" in prompt
     assert "actively try to falsify" in prompt
     assert "broken by an added line" in prompt
-    assert "summary and all three assessments must remain useful" in prompt
+    assert "summary and all five assessments must remain useful" in prompt
+    assert "style and test audits are deliberately picky" in prompt
+    assert "Every added or changed test passes the test-audit authoring gate" in prompt
+    assert "does not duplicate existing tests" in prompt
     assert '"No blocking issues"' in prompt
 
 
@@ -403,6 +516,8 @@ def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -
         "design_architecture": "No material concerns.",
         "api_assessment": "One API concern.",
         "implementation_assessment": "One implementation concern.",
+        "style_assessment": "One style concern.",
+        "test_assessment": "No tests changed.",
         "verdict": "Minor fixes needed",
         "findings": candidates,
     }
@@ -422,6 +537,8 @@ def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -
             "design_architecture": "No material concerns.",
             "api_assessment": "The return contract is broken.",
             "implementation_assessment": "No material concerns.",
+            "style_assessment": "No demonstrated style violation.",
+            "test_assessment": "No tests changed.",
             "verdict": "Minor fixes needed",
             "accepted_finding_ids": [0, 99, 0],
         }
@@ -446,6 +563,7 @@ def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -
     assert "Never create a new finding" in prompt
     assert "maintainability concern that warrants maintainer action" in prompt
     assert "do not raise the bar" in prompt
+    assert "Do not reject a finding merely because it is style-only or test-only" in prompt
     assert "preserve useful" in prompt
     assert "PR-specific feedback" in prompt
     assert captured["output_schema"] == reviewer._critic_schema()
@@ -464,6 +582,8 @@ def test_prepublication_critic_preserves_specific_feedback_without_findings(monk
             "design_architecture": "The new distillation template stays within the existing generator boundary.",
             "api_assessment": "Existing PPO names and CLI inputs remain accepted.",
             "implementation_assessment": "Discovery, rendering, and generated config naming were traced together.",
+            "style_assessment": "The template follows adjacent naming and structure.",
+            "test_assessment": "No tests were added or changed.",
             "verdict": "No blocking issues",
             "accepted_finding_ids": [],
         }
@@ -477,6 +597,8 @@ def test_prepublication_critic_preserves_specific_feedback_without_findings(monk
             "design_architecture": "Review the template boundary.",
             "api_assessment": "Review the CLI contract.",
             "implementation_assessment": "Review discovery and rendering.",
+            "style_assessment": "Review adjacent style.",
+            "test_assessment": "Review changed tests.",
             "verdict": "Minor fixes needed",
             "findings": [],
         },
@@ -489,6 +611,8 @@ def test_prepublication_critic_preserves_specific_feedback_without_findings(monk
         "design_architecture": "The new distillation template stays within the existing generator boundary.",
         "api_assessment": "Existing PPO names and CLI inputs remain accepted.",
         "implementation_assessment": "Discovery, rendering, and generated config naming were traced together.",
+        "style_assessment": "The template follows adjacent naming and structure.",
+        "test_assessment": "No tests were added or changed.",
         "verdict": "No blocking issues",
         "findings": [],
     }
@@ -522,6 +646,8 @@ def test_review_body_keeps_specific_feedback_without_inline_findings() -> None:
             "design_architecture": "The new template follows the existing generator boundary.",
             "api_assessment": "Existing algorithm names and CLI inputs remain accepted.",
             "implementation_assessment": "Discovery, rendering, and config naming were traced together.",
+            "style_assessment": "The template follows adjacent naming and structure.",
+            "test_assessment": "No tests were added or changed.",
             "verdict": "No blocking issues",
         },
         [],
@@ -530,6 +656,8 @@ def test_review_body_keeps_specific_feedback_without_inline_findings() -> None:
     )
 
     assert "The template remains the source of truth" in body
+    assert "**Style consistency:** The template follows adjacent naming and structure." in body
+    assert "**Test quality:** No tests were added or changed." in body
     assert "**No blocking issues.**" in body
     assert "No inline issue met the actionable-evidence threshold" in body
     assert "No material issues were identified" not in body

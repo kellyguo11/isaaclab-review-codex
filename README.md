@@ -11,14 +11,20 @@ Every pull request is reviewed by a two-model ensemble:
 - `azure/anthropic/claude-opus-5`
 - `azure/openai/gpt-5.6-sol`
 
-Each model independently runs three specialist passes: design and architecture,
-API contracts, and implementation quality. Opus 5 then conservatively
-aggregates all six results into one review; GPT-5.6 Sol handles aggregation if
+Each model independently runs five specialist passes: design and architecture,
+API contracts, implementation quality, style consistency, and test quality.
+The style pass deliberately applies the current Isaac Lab contribution guide
+and adjacent code patterns strictly, including small consistency and
+maintainability issues. The test pass applies the repository's `test-audit`
+authoring gate to every added or changed test case, checking that it owns a
+distinct contract and does not duplicate existing tests, fixtures, scenes,
+backends, or parameter axes. Opus 5 then conservatively aggregates all ten
+results into one review; GPT-5.6 Sol handles aggregation if
 Opus is unavailable. Before publication, GPT-5.6 Sol independently checks every
 candidate issue against the diff and rejects anything that does not clearly
 need fixing; Opus handles this verification if GPT is unavailable. The verifier
 can accept or reject existing candidate IDs but cannot invent or relocate
-findings. A normal review therefore makes eight NVIDIA inference requests. If
+findings. A normal review therefore makes twelve NVIDIA inference requests. If
 verification fails with both models, nothing is posted.
 Each request allows up to 65,536 output tokens so reasoning models have enough
 budget to produce their final structured answer.
@@ -27,8 +33,12 @@ Review context is capped at 2,100,000 characters, increased from the original
 480,000-character budget. This leaves tokenizer headroom inside the configured
 models' one-million-token input windows. The allocator preserves the complete PR
 diff before using the remaining space for line-numbered current-file excerpts
-around every changed region. If only supplemental context is limited, the
-review explicitly states that the full diff was still reviewed.
+around every changed region. The trusted context includes the base branch's
+coding and unit-testing contribution guidance and its `test-audit` skill. When
+tests change, the bot also includes bounded full changed-test content, the base
+test inventory, related existing tests, and CI test routing so duplication and
+test ownership findings have repository evidence. If only supplemental context
+is limited, the review explicitly states that the full diff was still reviewed.
 
 The review policy requires every specialist to inspect every patch hunk, compare
 deleted behavior with its replacement, trace changed producers and consumers,
@@ -38,17 +48,18 @@ registrations, configuration and CLI forwarding, templates, examples,
 documentation includes, and per-package changelog obligations. Files converted
 to thin delegates, moved modules, and renamed symbols receive extra scrutiny.
 
-It reports every finding that clears the high-confidence threshold, with no
-numerical cap, and rejects hypothetical edge cases, missing-test-only
-observations, logging preferences, optional hardening, alternative designs,
-formatting, and other subjective style feedback. An unchanged downstream
-consumer broken by an added line is considered introduced by the PR and remains
-reportable. Every finding must demonstrate a concrete design, architecture,
-API, or maintainability impact from an added line in the PR. Deterministic
-contract, repository-rule, documentation-integration, type, and
-producer/consumer failures do not require a runtime reproduction or a specific
-external caller to be reported. The bot posts concise explanatory comments and
-does not generate GitHub replacement-code suggestion blocks.
+It reports every finding that clears the evidence threshold, with no numerical
+cap, and rejects hypothetical edge cases, generic missing-test requests,
+logging preferences, optional hardening, alternative designs, and unsupported
+personal preferences. Exact formatting, naming, typing, documentation, local
+style, and test-value violations are intentionally reportable even when their
+appropriate severity is only a suggestion. An unchanged downstream consumer
+broken by an added line is considered introduced by the PR and remains
+reportable. Deterministic contract, repository-rule, style,
+documentation-integration, test-audit, type, and producer/consumer failures do
+not require a runtime reproduction or a specific external caller to be
+reported. The bot posts concise explanatory comments and does not generate
+GitHub replacement-code suggestion blocks.
 
 When no inline finding clears the evidence threshold, the bot still posts
 pull-request-specific feedback: the design approach reviewed, the exact API or
