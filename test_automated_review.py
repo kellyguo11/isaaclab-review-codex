@@ -374,8 +374,19 @@ def test_aggregate_completion_uses_nvidia_endpoint_and_fallback(monkeypatch) -> 
     reviewer = _load_review_module()
     calls = []
 
-    def fake_request(url, token, method="GET", payload=None, accept="application/json", extra_headers=None):
+    def fake_request(
+        url,
+        token,
+        method="GET",
+        payload=None,
+        accept="application/json",
+        extra_headers=None,
+        timeout_seconds=600,
+        max_attempts=3,
+    ):
         calls.append((url, token, method, payload))
+        assert timeout_seconds == reviewer._MODEL_REQUEST_TIMEOUT_SECONDS
+        assert max_attempts == 1
         if payload["model"] == "primary-model":
             raise RuntimeError("primary unavailable")
         return {
@@ -400,6 +411,23 @@ def test_aggregate_completion_uses_nvidia_endpoint_and_fallback(monkeypatch) -> 
     assert calls[1][3]["messages"][0]["role"] == "system"
     assert "JSON Schema" in calls[1][3]["messages"][0]["content"]
     assert calls[1][3]["max_tokens"] == 65_536
+
+
+def test_request_json_reports_read_timeout(monkeypatch) -> None:
+    """A bare socket read timeout should become an actionable request error."""
+    reviewer = _load_review_module()
+    attempts = []
+
+    def fake_urlopen(request, timeout):
+        attempts.append(timeout)
+        raise TimeoutError("The read operation timed out")
+
+    monkeypatch.setattr(reviewer.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(RuntimeError, match=r"timed out after 15s while waiting for response data"):
+        reviewer._request_json("https://example.invalid", "token", timeout_seconds=15, max_attempts=1)
+
+    assert attempts == [15]
 
 
 def test_specialist_ensemble_runs_every_role_on_every_model(monkeypatch) -> None:
@@ -468,6 +496,37 @@ def test_specialist_ensemble_uses_configured_concurrency(monkeypatch) -> None:
     )
 
     assert captured["max_workers"] == 10
+
+
+def test_non_test_specialists_omit_large_test_audit_evidence() -> None:
+    """Only the test specialist should receive duplicate full-test and inventory context."""
+    reviewer = _load_review_module()
+    review_input = json.dumps(
+        {
+            "files": [{"filename": "test_widget.py", "current_file": "visible to every specialist"}],
+            "test_audit_context": {
+                "changed_test_files": [
+                    {"path": "test_widget.py", "current_file": "large complete test", "complete": True}
+                ],
+                "repository_test_inventory": ["test_widget.py", "test_existing.py"],
+                "inventory_truncated": False,
+                "related_existing_tests": [{"path": "test_existing.py", "current_file": "large related test"}],
+                "ci_test_routing": "large CI routing file",
+            },
+        }
+    )
+
+    test_input = reviewer._specialist_review_input(review_input, "test_quality")
+    implementation_input = json.loads(reviewer._specialist_review_input(review_input, "implementation_quality"))
+
+    assert test_input == review_input
+    assert implementation_input["files"][0]["current_file"] == "visible to every specialist"
+    assert implementation_input["test_audit_context"]["changed_test_files"] == [
+        {"path": "test_widget.py", "complete": True}
+    ]
+    assert implementation_input["test_audit_context"]["repository_test_inventory"] == []
+    assert implementation_input["test_audit_context"]["related_existing_tests"] == []
+    assert implementation_input["test_audit_context"]["ci_test_routing"] == ""
 
 
 def test_specialist_prompt_requires_adversarial_review_before_no_findings(monkeypatch) -> None:

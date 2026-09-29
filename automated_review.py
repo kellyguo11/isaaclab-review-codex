@@ -48,6 +48,7 @@ _DEFAULT_MAX_CONCURRENT_MODEL_REQUESTS = 10
 _MAX_SPECIALIST_REQUESTS = 10
 _PROGRESS_HEARTBEAT_SECONDS = 30
 _REQUEST_TIMEOUT_SECONDS = 600
+_MODEL_REQUEST_TIMEOUT_SECONDS = 900
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 _SEVERITY_ORDER = {"critical": 0, "warning": 1, "suggestion": 2}
 _FINDING_CATEGORIES = {
@@ -322,6 +323,8 @@ def _request_json(
     payload: dict[str, Any] | None = None,
     accept: str = "application/json",
     extra_headers: dict[str, str] | None = None,
+    timeout_seconds: float = _REQUEST_TIMEOUT_SECONDS,
+    max_attempts: int = 3,
 ) -> dict[str, Any] | list[Any]:
     """Send an authenticated HTTP request and decode its JSON response."""
     headers = {
@@ -333,10 +336,10 @@ def _request_json(
     headers.update(extra_headers or {})
     request_data = json.dumps(payload).encode("utf-8") if payload is not None else None
     last_error: Exception | None = None
-    for attempt in range(3):
+    for attempt in range(max_attempts):
         request = urllib.request.Request(url, data=request_data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
                 response_data = response.read()
             if not response_data:
                 return {}
@@ -347,14 +350,21 @@ def _request_json(
         except urllib.error.HTTPError as error:
             error_body = error.read().decode("utf-8", errors="replace")
             last_error = RuntimeError(f"{method} {url} failed with HTTP {error.code}: {error_body[:2_000]}")
-            if error.code not in _RETRYABLE_STATUS_CODES or attempt == 2:
+            if error.code not in _RETRYABLE_STATUS_CODES or attempt == max_attempts - 1:
                 raise last_error from error
             retry_after = error.headers.get("Retry-After", "")
             delay = min(float(retry_after), 60.0) if retry_after.replace(".", "", 1).isdigit() else 2**attempt
             time.sleep(delay)
         except urllib.error.URLError as error:
             last_error = RuntimeError(f"{method} {url} failed: {error.reason}")
-            if attempt == 2:
+            if attempt == max_attempts - 1:
+                raise last_error from error
+            time.sleep(2**attempt)
+        except TimeoutError as error:
+            last_error = RuntimeError(
+                f"{method} {url} timed out after {timeout_seconds:g}s while waiting for response data"
+            )
+            if attempt == max_attempts - 1:
                 raise last_error from error
             time.sleep(2**attempt)
     raise last_error or RuntimeError(f"{method} {url} failed.")
@@ -921,13 +931,14 @@ def _run_specialist_reviews(
     _progress(
         f"Starting {request_count} specialist requests across {len(models)} models (up to {worker_count} concurrent)."
     )
+    role_inputs = {role_name: _specialist_review_input(review_input, role_name) for role_name in roles}
     with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = {
             executor.submit(
                 _run_review_pass_with_progress,
                 role_name,
                 instructions,
-                review_input,
+                role_inputs[role_name],
                 model,
                 api_key,
             ): (role_name, model)
@@ -963,6 +974,42 @@ def _run_specialist_reviews(
     return results
 
 
+def _specialist_review_input(review_input: str, role_name: str) -> str:
+    """Remove test-only repository evidence from specialist passes that do not use it."""
+    if role_name == "test_quality":
+        return review_input
+    try:
+        parsed_input = json.loads(review_input)
+    except (json.JSONDecodeError, TypeError):
+        return review_input
+    if not isinstance(parsed_input, dict):
+        return review_input
+    audit_context = parsed_input.get("test_audit_context")
+    if not isinstance(audit_context, dict):
+        return review_input
+
+    changed_test_files = audit_context.get("changed_test_files")
+    test_file_summary = []
+    if isinstance(changed_test_files, list):
+        test_file_summary = [
+            {
+                "path": entry.get("path"),
+                "complete": entry.get("complete"),
+            }
+            for entry in changed_test_files
+            if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+        ]
+    parsed_input["test_audit_context"] = {
+        "changed_test_files": test_file_summary,
+        "repository_test_inventory": [],
+        "inventory_truncated": audit_context.get("inventory_truncated", False),
+        "related_existing_tests": [],
+        "ci_test_routing": "",
+        "evidence_scope": "Full test-audit evidence is supplied only to the test_quality specialist.",
+    }
+    return json.dumps(parsed_input, ensure_ascii=False, separators=(",", ":"))
+
+
 def _run_review_pass_with_progress(
     role_name: str,
     role_instructions: str,
@@ -973,7 +1020,7 @@ def _run_review_pass_with_progress(
     """Run one specialist pass with start, completion, and duration messages."""
     started_at = time.monotonic()
     label = f"specialist {role_name} with {model}"
-    _progress(f"Specialist started: {role_name} with {model}.")
+    _progress(f"Specialist started: {role_name} with {model} ({len(review_input):,} context characters).")
     heartbeat = _start_progress_heartbeat(label)
     try:
         result = _run_review_pass(role_name, role_instructions, review_input, model, api_key)
@@ -1372,7 +1419,14 @@ def _request_model_completion(
 ) -> dict[str, Any]:
     """Request and decode one structured completion from one ensemble model."""
     payload = _chat_completions_payload(model, system_prompt, user_input, output_schema)
-    response = _request_json(_NVIDIA_CHAT_COMPLETIONS_URL, api_key, method="POST", payload=payload)
+    response = _request_json(
+        _NVIDIA_CHAT_COMPLETIONS_URL,
+        api_key,
+        method="POST",
+        payload=payload,
+        timeout_seconds=_MODEL_REQUEST_TIMEOUT_SECONDS,
+        max_attempts=1,
+    )
     return _extract_chat_completion_output(response)
 
 

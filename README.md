@@ -39,7 +39,11 @@ from four waves to one while preserving every role and both ensemble models.
 Aggregation and pre-publication verification remain sequential because each
 depends on the preceding result.
 Each request allows up to 65,536 output tokens so reasoning models have enough
-budget to produce their final structured answer.
+budget to produce their final structured answer. Model responses may take up
+to 15 minutes before the bot treats the connection as stalled. A timed-out
+specialist is not retried because its counterpart model is already reviewing
+the same role; aggregation and verification instead try the other configured
+model. This avoids turning one provider stall into another 15-minute wait.
 
 Review context is capped at 2,100,000 characters, increased from the original
 480,000-character budget. This leaves tokenizer headroom inside the configured
@@ -49,8 +53,11 @@ around every changed region. The trusted context includes the base branch's
 coding and unit-testing contribution guidance and its `test-audit` skill. When
 tests change, the bot also includes bounded full changed-test content, the base
 test inventory, related existing tests, and CI test routing so duplication and
-test ownership findings have repository evidence. If only supplemental context
-is limited, the review explicitly states that the full diff was still reviewed.
+test ownership findings have repository evidence. That expanded test evidence
+is sent only to the dedicated test-quality specialist; other specialists still
+receive the changed-file patches and excerpts but do not receive redundant full
+test files and inventory data. If only supplemental context is limited, the
+review explicitly states that the full diff was still reviewed.
 
 The review policy requires every specialist to inspect every patch hunk, compare
 deleted behavior with its replacement, trace changed producers and consumers,
