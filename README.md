@@ -23,10 +23,17 @@ units, ordering, configuration keys, CLI flags, registry IDs, exceptions,
 side effects, and serialized forms.
 The style pass deliberately applies the current Isaac Lab contribution guide
 and adjacent code patterns strictly, including small consistency and
-maintainability issues. The test pass applies the repository's `test-audit`
-authoring gate to every added or changed test case, checking that it owns a
-distinct contract and does not duplicate existing tests, fixtures, scenes,
-backends, or parameter axes. Opus 5 then conservatively aggregates all ten
+maintainability issues. It also audits every changed comment and docstring,
+flagging prose that restates code, narrates syntax, duplicates nearby
+documentation, adds generic filler, or is substantially longer than its useful
+rationale. The bot describes the concrete prose problem and never speculates
+about whether a contributor used AI. The test pass applies the repository's
+`test-audit` authoring gate to every added or changed test function,
+parametrized row or axis, fixture, helper, scene build, and test-only production
+seam. Each must own a distinct observable contract at the strongest boundary,
+catch a credible product regression for the intended reason, and add value not
+already supplied by existing coverage. Merely executing code or increasing
+coverage does not justify a test. Opus 5 then conservatively aggregates all ten
 results into one review; GPT-5.6 Sol handles aggregation if
 Opus is unavailable. Before publication, GPT-5.6 Sol independently checks every
 candidate issue against the diff and rejects anything that does not clearly

@@ -904,25 +904,41 @@ def _run_specialist_reviews(
             "under one owner; and keep backend selection at established dispatch boundaries. Check hot-path allocations, "
             "copies, synchronization, Python loops, and unnecessary materialization. Check file and class member order, "
             "import placement and relative-import depth, naming, concrete modern type hints, Google-style docstrings, "
-            "physical units, shapes and frames, concise comments, lazy exports and ``.pyi`` stubs, configuration/runtime "
-            "splits, resolvable strings, and exact local vocabulary and patterns. Formatting, naming, documentation, and "
-            "small consistency defects are in scope when the guide or adjacent code proves the expected form. Do not "
-            "invent a preference where neither the guide nor existing code establishes one."
+            "physical units, shapes and frames, lazy exports and ``.pyi`` stubs, configuration/runtime splits, resolvable "
+            "strings, and exact local vocabulary and patterns. Audit every added or edited comment and docstring. Comments "
+            "must explain non-obvious intent, invariants, constraints, units, frames, or workarounds; flag prose that merely "
+            "restates the next statement, translates syntax into English, narrates loops or branches, repeats signatures or "
+            "types, duplicates nearby documentation, or adds generic section banners, tutorial filler, meta-commentary, "
+            "marketing language, or repetitive qualifications. Flag an oversized comment or docstring when the same useful "
+            "information can be stated plainly and substantially more concisely, and flag copied or stale prose that names "
+            "the wrong abstraction. Do not allege that text was AI-generated or use authorship as evidence; describe the "
+            "objective defect as redundant, verbose, vague, duplicative, stale, or inconsistent. Preserve genuinely useful "
+            "design rationale and non-obvious safety constraints even when they are detailed. Formatting, naming, "
+            "documentation, and small consistency defects are in scope when the guide or adjacent code proves the expected "
+            "form. Do not invent a preference where neither the guide nor existing code establishes one."
         ),
         "test_quality": (
             "Apply test_audit_guidance in authoring mode to every added or changed Python test in test_audit_context. Be "
-            "strict: each new test case must protect a distinct observable behavior, invariant, regression, boundary, or "
-            "failure mode; name the credible regression and why existing coverage would not catch it. Compare complete "
-            "changed tests with related_existing_tests and repository_test_inventory. Flag duplicate tests, overlapping "
-            "fixtures, redundant parameter rows or Cartesian axes that execute the same path, repeated scene builds, "
-            "backend replays of backend-independent logic, assertion-free probes, self-comparisons, copied inventories, "
-            "source/string greps without an independent contract, private implementation assertions, production seams "
-            "used only by tests, expected values derived by repeating production logic, mocks or fixtures that supply the "
-            "asserted behavior, unrelated negative controls, and names that promise more than the inputs exercise. A bug "
-            "regression must logically fail on the pre-fix behavior for the intended reason. Do not call distinct physical "
-            "fixtures, backend-specific paths, packaging contracts, determinism, units, frames, or public API boundaries "
-            "duplicates merely because their assertions look similar. Missing tests are not findings in this pass. If the "
-            "PR adds or changes no Python test, return no findings and state that explicitly."
+            "strict. Treat every new test function or method, parametrized row or axis, fixture, scene build, helper, and "
+            "test-only production seam as a separate cost that must earn its place. For each one, identify the distinct "
+            "observable behavior, invariant, regression, boundary, or failure mode it owns; the credible product regression "
+            "that would make it fail for the intended reason; the strongest owner boundary; and why existing coverage would "
+            "not already catch that regression. If an added case cannot establish all of those from the supplied evidence, "
+            "report it as unnecessary rather than crediting it merely for increasing coverage or exercising code. Compare "
+            "complete changed tests with related_existing_tests and repository_test_inventory. Flag duplicate tests, weaker "
+            "replays of a contract already owned at a stronger boundary, overlapping fixtures, redundant parameter rows or "
+            "Cartesian axes that execute the same path, repeated scene builds that should share one test, backend replays of "
+            "backend-independent logic, assertion-free probes, self-comparisons, copied inventories, source/string greps "
+            "without an independent contract, tests of Python or dependency behavior rather than an Isaac Lab contract, "
+            "private implementation assertions, production seams used only by tests, expected values derived by repeating "
+            "production logic, mocks or fixtures that supply the asserted behavior, unrelated negative controls, and names "
+            "that promise more than the inputs exercise. A bug regression must logically fail on the pre-fix behavior for "
+            "the intended reason. One owner-boundary test covers one bug; do not replay the same scenario at every layer or "
+            "backend unless that layer or backend introduces a distinct risk. Do not call distinct physical fixtures, "
+            "backend-specific paths, packaging contracts, determinism, units, frames, or public API boundaries duplicates "
+            "merely because their assertions look similar. Missing tests are not findings in this pass. Return every added "
+            "case that fails the authoring gate, but consolidate rows or sibling cases with the same root cause into one "
+            "concise finding. If the PR adds or changes no Python test, return no findings and state that explicitly."
         ),
     }
     results: list[dict[str, Any]] = []
@@ -1087,7 +1103,14 @@ Review rules:
   paths during the transition. Do not demand an invented version or duration when the trusted policy does not specify
   one, but do require an actual transition rather than immediate removal.
 - An implementation-style finding must violate a trusted repository rule or established adjacent pattern and have a
-  material API or maintainability impact; preference alone is not a finding.
+  material API or maintainability impact; preference alone is not a finding. A directly evidenced low-signal comment or
+  docstring creates maintainability cost when it repeats the code, narrates syntax, duplicates nearby documentation, uses
+  vague filler, or is substantially longer than the useful rationale it conveys. Report that as style_consistency, never
+  as suspected AI authorship.
+- For a newly added test, failure to own a distinct observable contract at the strongest boundary is a positive
+  test-quality defect, not a missing-test request. Passing, increasing line coverage, or exercising a code path does not
+  establish value. A direct junk-pattern match or a demonstrated duplicate owner is sufficient evidence; do not require
+  proof that the test can never catch any conceivable bug.
 - If the failure path is incomplete or the concern is only a design preference, omit it.
 - Use critical only for correctness, security, data-loss, or severe compatibility defects.
 - Return every finding that satisfies this high bar, ordered by severity and impact; do not add filler.
@@ -1110,7 +1133,8 @@ Required review protocol:
    changed file, try to prove it from the supplied evidence, and discard it only after the relevant path is shown safe.
 7. Missing tests alone are not a finding, but untested new public or integration behavior requires closer manual tracing;
    never assume it works merely because a thin delegation or source-inspection test exists. When tests are changed, audit
-   every added test case against the authoring gate and compare it with the supplied existing test ownership evidence.
+   every function, parametrized row or axis, fixture, helper, scene build, and test-only production seam against the
+   authoring gate and compare it with the supplied existing test ownership evidence.
 """
     return _request_model_completion(
         model,
@@ -1178,10 +1202,17 @@ Before accepting a no-finding result, explicitly check these common cross-cuttin
 - Finder or selector wrapper values must remain accepted through every changed consumer boundary.
 - New code follows the contribution guide and established adjacent code exactly: lean functional structure for stateless
   work, justified classes and helpers, direct known-attribute access, single ownership, file and member ordering, imports,
-  naming, typing, documentation, comments, lazy exports, configuration boundaries, and hot-path cost conventions.
-- Every added or changed test passes the test-audit authoring gate, owns a distinct observable contract at the strongest
-  boundary, would catch a credible regression for the intended reason, and does not duplicate existing tests, fixtures,
-  scenes, backends, parameter axes, or production transformations supplied in the test-audit context.
+  naming, typing, documentation, lazy exports, configuration boundaries, and hot-path cost conventions. Inspect every
+  changed comment and docstring for useful non-obvious intent. Treat restated code, syntax narration, duplicated nearby
+  documentation, generic banners or tutorial filler, vague marketing language, stale copied prose, and substantially
+  overlong explanations as reportable style debt. Describe the concrete prose defect; never speculate about AI authorship.
+- Every added or changed test function, parametrized row or axis, fixture, helper, scene build, and test-only production
+  seam passes the test-audit authoring gate. It must own a distinct observable contract at the strongest boundary, catch a
+  credible product regression for the intended reason, and add value not already provided by existing tests. Reject cases
+  that merely execute code, increase coverage, retest Python or a dependency, repeat a stronger owner-boundary proof, or
+  duplicate fixtures, scenes, backends, parameter axes, or production transformations supplied in the test-audit context.
+  Group sibling cases with the same redundancy into one finding, but do not silently retain any added case that fails the
+  gate.
 
 Specialist repetition is not proof. Independently validate each claim and discard it when evidence is incomplete,
 subjective, speculative, or merely an alternative design. Style-only and test-only findings are explicitly in scope when
@@ -1254,6 +1285,18 @@ path or asserted duplication depends on missing context. Do not reject a finding
 test-only: those are explicit review goals. Do not reject a finding merely because its impact appears in an unchanged
 caller, include, template, registration, or existing test when the changed line and supplied evidence establish the
 causal path.
+
+For test-quality candidates, accept an unnecessary-test finding when the added case directly matches a trusted junk
+pattern, repeats a stronger owner-boundary test, or cannot identify a distinct behavior and credible product regression
+beyond executing code or raising coverage. A test does not earn retention merely because it passes or could catch some
+unspecified future bug. Validate claimed duplication against the complete changed test and supplied ownership evidence,
+and keep distinct backend, physical-fixture, units, frames, determinism, packaging, migration, or public-contract cases.
+
+For comment and docstring candidates, accept concise style_consistency findings when the added prose objectively restates
+the code, narrates syntax or control flow, duplicates nearby documentation, uses generic banners, tutorial or marketing
+filler, repeats qualifications, is stale, or is substantially longer than its useful non-obvious rationale. Useful design
+reasoning, invariants, safety constraints, units, frames, and workarounds remain valuable. Never claim or imply that a
+contributor used AI; review only the text's concrete clarity, redundancy, accuracy, and maintenance cost.
 
 Be especially skeptical of a proposed no-finding result for a removed or changed contract. Accept every directly
 evidenced breaking change that lacks a complete deprecation bridge, using the same old-contract-functional, targeted

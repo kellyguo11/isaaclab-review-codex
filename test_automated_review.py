@@ -463,8 +463,14 @@ def test_specialist_ensemble_runs_every_role_on_every_model(monkeypatch) -> None
     assert "files converted into thin delegates" in instructions["implementation_quality"]
     assert "new lean-code guidance from PR 8117" in instructions["style_consistency"]
     assert "direct attribute access" in instructions["style_consistency"]
+    assert "Audit every added or edited comment and docstring" in instructions["style_consistency"]
+    assert "Do not allege that text was AI-generated" in instructions["style_consistency"]
+    assert "restates the next statement" in instructions["style_consistency"]
     assert "Apply test_audit_guidance in authoring mode" in instructions["test_quality"]
     assert "duplicate tests" in instructions["test_quality"]
+    assert "every new test function or method" in instructions["test_quality"]
+    assert "merely for increasing coverage or exercising code" in instructions["test_quality"]
+    assert "tests of Python or dependency behavior" in instructions["test_quality"]
     assert {(result["review_pass"], result["model"]) for result in results} == {
         (role, model) for role in roles for model in ("opus-model", "gpt-model")
     }
@@ -566,7 +572,11 @@ def test_specialist_prompt_requires_adversarial_review_before_no_findings(monkey
     assert "contribution_guidance" in prompt
     assert "test_audit_guidance" in prompt
     assert "style, formatting, naming" in prompt
-    assert "audit every added test case" in prompt
+    assert "audit every function, parametrized row or axis" in prompt
+    assert "low-signal comment or docstring" in prompt
+    assert "never as suspected AI authorship" in prompt
+    assert "failure to own a distinct observable contract" in prompt
+    assert "Passing, increasing line coverage, or exercising a code path does not establish value" in prompt
     assert "Build an explicit compatibility ledger" in prompt
     assert "valid_deleted_line_ranges (LEFT)" in prompt
     assert "A changelog, migration note, major-version claim" in prompt
@@ -611,8 +621,11 @@ def test_aggregation_prompt_rechecks_every_file_before_no_findings(monkeypatch) 
     assert "broken by an added line" in prompt
     assert "summary and all six assessments must remain useful" in prompt
     assert "main, style, and test audits are deliberately picky" in prompt
-    assert "Every added or changed test passes the test-audit authoring gate" in prompt
-    assert "does not duplicate existing tests" in prompt
+    assert "Inspect every changed comment and docstring" in prompt
+    assert "never speculate about AI authorship" in prompt
+    assert "Every added or changed test function, parametrized row or axis" in prompt
+    assert "merely execute code, increase coverage" in prompt
+    assert "do not silently retain any added case that fails the gate" in prompt
     assert "Every incompatible change" in prompt
     assert "old-versus-new compatibility ledger" in prompt
     assert "all six assessments" in prompt
@@ -702,6 +715,10 @@ def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -
     assert "maintainability concern that warrants maintainer action" in prompt
     assert "do not raise the bar" in prompt
     assert "Do not reject a finding merely because it is style-only or test-only" in prompt
+    assert "could catch some unspecified future bug" in prompt
+    assert "Validate claimed duplication against the complete changed test" in prompt
+    assert "substantially longer than its useful non-obvious rationale" in prompt
+    assert "Never claim or imply that a contributor used AI" in prompt
     assert "LEFT-side findings on deleted lines" in prompt
     assert "old-contract-functional" in prompt
     assert "all six assessments" in prompt
