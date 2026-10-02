@@ -107,6 +107,15 @@ def test_review_context_preserves_complete_patch_and_changed_line_excerpts(monke
     assert serialized["contribution_guidance"] == "Trusted instructions"
     assert serialized["test_audit_guidance"] == "Trusted instructions"
     assert serialized["test_audit_context"]["changed_test_files"] == []
+    assert serialized["change_summary"] == {
+        "changed_files": 1,
+        "additions": 1,
+        "deletions": 1,
+        "changed_lines": 2,
+        "large_pr": False,
+        "large_pr_reasons": [],
+        "large_pr_thresholds": {"changed_files": 20, "changed_lines": 1_000},
+    }
     assert serialized["patches_truncated"] is False
     assert review_input.patches_truncated is False
     assert len(review_input.serialized) <= reviewer._MAX_CONTEXT_CHARS
@@ -177,6 +186,23 @@ def test_review_context_adds_bounded_test_audit_evidence(monkeypatch) -> None:
     assert "source/pkg/test/test_widget_existing.py" in audit_context["repository_test_inventory"]
     assert audit_context["related_existing_tests"][0]["path"] == "source/pkg/test/test_widget_existing.py"
     assert audit_context["ci_test_routing"] == "TIMEOUTS = {}\n"
+
+
+def test_change_summary_marks_large_review_surfaces() -> None:
+    """File-count and changed-line thresholds should independently identify large PRs."""
+    reviewer = _load_review_module()
+
+    many_files = reviewer._summarize_change_size(
+        [{"additions": 1, "deletions": 0} for _ in range(reviewer._LARGE_PR_FILE_THRESHOLD)]
+    )
+    many_lines = reviewer._summarize_change_size(
+        [{"additions": reviewer._LARGE_PR_CHANGED_LINE_THRESHOLD - 1, "deletions": 1}]
+    )
+
+    assert many_files["large_pr"] is True
+    assert many_files["large_pr_reasons"] == ["changed_files >= 20"]
+    assert many_lines["large_pr"] is True
+    assert many_lines["large_pr_reasons"] == ["changed_lines >= 1000"]
 
 
 def test_validate_findings_filters_invalid_locations_and_duplicates() -> None:
@@ -262,8 +288,8 @@ def test_validate_findings_has_no_numeric_cap() -> None:
     assert validated == [{**finding, "side": "RIGHT"} for finding in findings]
 
 
-def test_validate_findings_accepts_style_and_test_quality_categories() -> None:
-    """Style and test-audit findings should survive location validation."""
+def test_validate_findings_accepts_scope_style_and_test_quality_categories() -> None:
+    """Scope, style, and test-audit findings should survive location validation."""
     reviewer = _load_review_module()
     findings = [
         {
@@ -273,6 +299,15 @@ def test_validate_findings_accepts_style_and_test_quality_categories() -> None:
             "severity": "suggestion",
             "title": "Prefer direct attribute access",
             "body": "The known field is accessed reflectively, unlike the documented local pattern.",
+            "suggestion": "",
+        },
+        {
+            "path": "source/complex.py",
+            "line": 6,
+            "category": "scope_complexity",
+            "severity": "suggestion",
+            "title": "Remove the stateless wrapper class",
+            "body": "The class owns no state and duplicates the existing functional dispatch path.",
             "suggestion": "",
         },
         {
@@ -286,13 +321,21 @@ def test_validate_findings_accepts_style_and_test_quality_categories() -> None:
         },
     ]
 
-    assert reviewer._validate_findings(
+    validated = reviewer._validate_findings(
         findings,
         {
             "source/example.py": {"LEFT": set(), "RIGHT": {4}},
+            "source/complex.py": {"LEFT": set(), "RIGHT": {6}},
             "source/test_example.py": {"LEFT": set(), "RIGHT": {9}},
         },
-    ) == [{**finding, "side": "RIGHT"} for finding in findings]
+    )
+
+    assert {finding["category"] for finding in validated} == {
+        "scope_complexity",
+        "style_consistency",
+        "test_quality",
+    }
+    assert all(finding["side"] == "RIGHT" for finding in validated)
 
 
 def test_validate_findings_accepts_breaking_change_on_deleted_line() -> None:
@@ -443,13 +486,24 @@ def test_specialist_ensemble_runs_every_role_on_every_model(monkeypatch) -> None
 
     results = reviewer._run_specialist_reviews("review-input", ("opus-model", "gpt-model"), "nvidia-key")
 
-    roles = ("design_architecture", "api_contract", "implementation_quality", "style_consistency", "test_quality")
-    assert len(results) == 10
+    roles = (
+        "design_architecture",
+        "scope_complexity",
+        "api_contract",
+        "implementation_quality",
+        "style_consistency",
+        "test_quality",
+    )
+    assert len(results) == 12
     assert {(role, model) for role, _, model, _, _ in calls} == {
         (role, model) for role in roles for model in ("opus-model", "gpt-model")
     }
     instructions = {role: role_instructions for role, role_instructions, _, _, _ in calls}
     assert "coordinate-basis" in instructions["design_architecture"]
+    assert "Apply a deletion test to every added file" in instructions["scope_complexity"]
+    assert "Require every class to justify itself" in instructions["scope_complexity"]
+    assert "flat contiguous arrays" in instructions["scope_complexity"]
+    assert "dependency-ordered PR slices" in instructions["scope_complexity"]
     assert "internal zero-copy wrapper escaping" in instructions["api_contract"]
     assert (
         "Classify every directly evidenced incompatible change as category compatibility"
@@ -477,7 +531,7 @@ def test_specialist_ensemble_runs_every_role_on_every_model(monkeypatch) -> None
 
 
 def test_specialist_ensemble_uses_configured_concurrency(monkeypatch) -> None:
-    """All specialist requests should be able to run in one configured wave."""
+    """Specialist requests should respect the configured concurrency ceiling."""
     reviewer = _load_review_module()
     captured = {}
     real_executor = reviewer.concurrent.futures.ThreadPoolExecutor
@@ -577,6 +631,9 @@ def test_specialist_prompt_requires_adversarial_review_before_no_findings(monkey
     assert "never as suspected AI authorship" in prompt
     assert "failure to own a distinct observable contract" in prompt
     assert "Passing, increasing line coverage, or exercising a code path does not establish value" in prompt
+    assert "Apply the deletion test to every added construct" in prompt
+    assert "Prefer functional data flow and flat array operations" in prompt
+    assert "Build a line-necessity ledger" in prompt
     assert "Build an explicit compatibility ledger" in prompt
     assert "valid_deleted_line_ranges (LEFT)" in prompt
     assert "A changelog, migration note, major-version claim" in prompt
@@ -592,6 +649,7 @@ def test_aggregation_prompt_rechecks_every_file_before_no_findings(monkeypatch) 
         return {
             "summary": "The generator change keeps discovery template-driven.",
             "design_architecture": "The new template follows the existing generator boundary.",
+            "scope_complexity_assessment": "Scope is cohesive; no split recommended.",
             "api_assessment": "Existing algorithm names and CLI inputs remain accepted.",
             "compatibility_assessment": "Breaking changes: none identified. Existing contracts remain available.",
             "implementation_assessment": "Template discovery and rendering paths remain aligned.",
@@ -619,16 +677,21 @@ def test_aggregation_prompt_rechecks_every_file_before_no_findings(monkeypatch) 
     assert "Hydra or preset forwarding" in prompt
     assert "actively try to falsify" in prompt
     assert "broken by an added line" in prompt
-    assert "summary and all six assessments must remain useful" in prompt
-    assert "main, style, and test audits are deliberately picky" in prompt
+    assert "summary and all seven assessments must remain useful" in prompt
+    assert "complexity, style, and test audits are deliberately picky" in prompt
     assert "Inspect every changed comment and docstring" in prompt
     assert "never speculate about AI authorship" in prompt
     assert "Every added or changed test function, parametrized row or axis" in prompt
     assert "merely execute code, increase coverage" in prompt
     assert "do not silently retain any added case that fails the gate" in prompt
+    assert "Every added construct passes the deletion test" in prompt
+    assert "Stateless namespace classes" in prompt
+    assert "Suggested PR breakdown:" in prompt
+    assert "20 files or 1,000 changed lines" in prompt
+    assert "Scope is cohesive; no split recommended." in prompt
     assert "Every incompatible change" in prompt
     assert "old-versus-new compatibility ledger" in prompt
-    assert "all six assessments" in prompt
+    assert "all seven assessments" in prompt
     assert "Breaking changes: none identified." in prompt
     assert "valid_deleted_line_ranges (LEFT)" in prompt
     assert '"No blocking issues"' in prompt
@@ -663,6 +726,7 @@ def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -
     candidate_review = {
         "summary": "Two concerns.",
         "design_architecture": "No material concerns.",
+        "scope_complexity_assessment": "Scope is cohesive; no split recommended.",
         "api_assessment": "One API concern.",
         "compatibility_assessment": "Breaking changes: the public return contract changed without deprecation.",
         "implementation_assessment": "One implementation concern.",
@@ -685,6 +749,7 @@ def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -
         return {
             "summary": "One demonstrated API concern.",
             "design_architecture": "No material concerns.",
+            "scope_complexity_assessment": "Scope is cohesive; no split recommended.",
             "api_assessment": "The return contract is broken.",
             "compatibility_assessment": "Breaking changes: the return type changed without a deprecation bridge.",
             "implementation_assessment": "No material concerns.",
@@ -719,9 +784,13 @@ def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -
     assert "Validate claimed duplication against the complete changed test" in prompt
     assert "substantially longer than its useful non-obvious rationale" in prompt
     assert "Never claim or imply that a contributor used AI" in prompt
+    assert "apply the deletion test yourself" in prompt
+    assert "functional, flat-array, batched" in prompt
+    assert "Do not label deletion, flattening, vectorization, or reuse as an optional refactor" in prompt
+    assert "Suggested PR breakdown:" in prompt
     assert "LEFT-side findings on deleted lines" in prompt
     assert "old-contract-functional" in prompt
-    assert "all six assessments" in prompt
+    assert "all seven assessments" in prompt
     assert "preserve useful" in prompt
     assert "PR-specific feedback" in prompt
     assert captured["output_schema"] == reviewer._critic_schema()
@@ -738,6 +807,7 @@ def test_prepublication_critic_preserves_specific_feedback_without_findings(monk
         return {
             "summary": "The template remains the source of truth for RSL-RL algorithm discovery.",
             "design_architecture": "The new distillation template stays within the existing generator boundary.",
+            "scope_complexity_assessment": "Scope is cohesive; no split recommended.",
             "api_assessment": "Existing PPO names and CLI inputs remain accepted.",
             "compatibility_assessment": "Breaking changes: none identified. Existing contracts remain available.",
             "implementation_assessment": "Discovery, rendering, and generated config naming were traced together.",
@@ -754,6 +824,7 @@ def test_prepublication_critic_preserves_specific_feedback_without_findings(monk
         {
             "summary": "One candidate concern.",
             "design_architecture": "Review the template boundary.",
+            "scope_complexity_assessment": "Review the implementation scope.",
             "api_assessment": "Review the CLI contract.",
             "compatibility_assessment": "Review the compatibility ledger.",
             "implementation_assessment": "Review discovery and rendering.",
@@ -769,6 +840,7 @@ def test_prepublication_critic_preserves_specific_feedback_without_findings(monk
     assert verified == {
         "summary": "The template remains the source of truth for RSL-RL algorithm discovery.",
         "design_architecture": "The new distillation template stays within the existing generator boundary.",
+        "scope_complexity_assessment": "Scope is cohesive; no split recommended.",
         "api_assessment": "Existing PPO names and CLI inputs remain accepted.",
         "compatibility_assessment": "Breaking changes: none identified. Existing contracts remain available.",
         "implementation_assessment": "Discovery, rendering, and generated config naming were traced together.",
@@ -805,6 +877,7 @@ def test_review_body_keeps_specific_feedback_without_inline_findings() -> None:
         {
             "summary": "The template remains the source of truth for RSL-RL algorithm discovery.",
             "design_architecture": "The new template follows the existing generator boundary.",
+            "scope_complexity_assessment": "Scope is cohesive; no split recommended.",
             "api_assessment": "Existing algorithm names and CLI inputs remain accepted.",
             "compatibility_assessment": "Breaking changes: none identified. Existing contracts remain available.",
             "implementation_assessment": "Discovery, rendering, and config naming were traced together.",
@@ -818,6 +891,7 @@ def test_review_body_keeps_specific_feedback_without_inline_findings() -> None:
     )
 
     assert "The template remains the source of truth" in body
+    assert "**Scope and complexity:** Scope is cohesive; no split recommended." in body
     assert "**Compatibility and deprecation:** Breaking changes: none identified." in body
     assert "**Style consistency:** The template follows adjacent naming and structure." in body
     assert "**Test quality:** No tests were added or changed." in body
@@ -836,6 +910,7 @@ def test_review_body_does_not_call_actionable_findings_non_blocking() -> None:
         {
             "summary": "A public contract was removed.",
             "design_architecture": "The module boundary is otherwise unchanged.",
+            "scope_complexity_assessment": "Scope is cohesive; no split recommended.",
             "api_assessment": "The old entry point is no longer available.",
             "compatibility_assessment": "Breaking changes: the entry point was removed without deprecation.",
             "implementation_assessment": "The replacement path is internally coherent.",

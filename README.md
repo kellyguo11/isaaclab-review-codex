@@ -11,10 +11,19 @@ Every pull request is reviewed by a two-model ensemble:
 - `azure/anthropic/claude-opus-5`
 - `azure/openai/gpt-5.6-sol`
 
-Each model independently runs five specialist passes: design and architecture,
-API contracts, implementation quality, style consistency, and test quality.
-The three main passes use a skeptical maintainer standard: they compare deleted
-behavior with its replacement line by line, trace boundary and failure paths,
+Each model independently runs six specialist passes: design and architecture,
+scope and complexity, API contracts, implementation quality, style consistency,
+and test quality. The scope pass applies a deletion test to every added file,
+class, helper, branch, wrapper, configuration option, conversion, comment, and
+test: if the PR's required behavior and supported contracts survive without it,
+the bot reports the unnecessary code. Classes must justify meaningful state,
+resource ownership, lifecycle invariants, or required polymorphism. The review
+prefers pure functions, explicit data flow, flat contiguous arrays, batched
+tensor or Warp operations, and existing dispatch boundaries over object graphs,
+per-item objects, nested containers, Python element loops, forwarding layers,
+and speculative abstractions. The core passes use a skeptical maintainer
+standard: they compare deleted behavior with its replacement line by line,
+trace boundary and failure paths,
 and report directly evidenced semantic, integration, architectural, API, and
 maintainability defects even when they do not produce an immediate crash.
 The API pass builds an old-versus-new compatibility ledger for every touched
@@ -39,10 +48,11 @@ Opus is unavailable. Before publication, GPT-5.6 Sol independently checks every
 candidate issue against the diff and rejects anything that does not clearly
 need fixing; Opus handles this verification if GPT is unavailable. The verifier
 can accept or reject existing candidate IDs but cannot invent or relocate
-findings. A normal review therefore makes twelve NVIDIA inference requests. If
+findings. A normal review therefore makes fourteen NVIDIA inference requests. If
 verification fails with both models, nothing is posted.
-All ten specialist requests run concurrently by default, reducing that stage
-from four waves to one while preserving every role and both ensemble models.
+Up to ten of the twelve specialist requests run concurrently by default. This
+keeps the added complexity audit without serializing all specialist work; the
+remaining requests begin as soon as a worker is available.
 Aggregation and pre-publication verification remain sequential because each
 depends on the preceding result.
 Each request allows up to 65,536 output tokens so reasoning models have enough
@@ -73,6 +83,12 @@ explicitly audits downstream callers, public exports and lazy-loading stubs,
 registrations, configuration and CLI forwarding, templates, examples,
 documentation includes, and per-package changelog obligations. Files converted
 to thin delegates, moved modules, and renamed symbols receive extra scrutiny.
+The bot records total changed files, additions, deletions, and changed lines. A
+PR is objectively marked large at 20 files or 1,000 changed lines. Large PRs—and
+smaller PRs containing independently shippable concerns—receive a concrete,
+dependency-ordered proposal for two to five smaller PRs, including each slice's
+behavior, affected subsystem, and focused validation boundary. Cohesive smaller
+PRs are explicitly reported as not needing a split.
 
 It reports every finding that clears the evidence threshold, with no numerical
 cap, and rejects hypothetical edge cases, generic missing-test requests,

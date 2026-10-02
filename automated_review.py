@@ -49,10 +49,13 @@ _MAX_SPECIALIST_REQUESTS = 10
 _PROGRESS_HEARTBEAT_SECONDS = 30
 _REQUEST_TIMEOUT_SECONDS = 600
 _MODEL_REQUEST_TIMEOUT_SECONDS = 900
+_LARGE_PR_FILE_THRESHOLD = 20
+_LARGE_PR_CHANGED_LINE_THRESHOLD = 1_000
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 _SEVERITY_ORDER = {"critical": 0, "warning": 1, "suggestion": 2}
 _FINDING_CATEGORIES = {
     "design_architecture",
+    "scope_complexity",
     "api",
     "compatibility",
     "implementation",
@@ -444,6 +447,7 @@ def _build_review_input(
         current_files,
         github_token,
     )
+    change_summary = _summarize_change_size(changed_files)
     fixed_context = {
         "pull_request": {
             "number": pull_request.get("number"),
@@ -459,6 +463,7 @@ def _build_review_input(
         "contribution_guidance": contribution_guidance,
         "test_audit_guidance": test_audit_guidance,
         "test_audit_context": test_audit_context,
+        "change_summary": change_summary,
     }
     empty_model_input = {
         **fixed_context,
@@ -526,6 +531,38 @@ def _build_review_input(
         truncated=truncated,
         patches_truncated=patches_truncated,
     )
+
+
+def _summarize_change_size(changed_files: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize the review surface and identify objectively large pull requests."""
+
+    def count(field: str) -> int:
+        return sum(
+            value
+            for file_data in changed_files
+            if isinstance((value := file_data.get(field)), int) and not isinstance(value, bool) and value >= 0
+        )
+
+    additions = count("additions")
+    deletions = count("deletions")
+    changed_lines = additions + deletions
+    reasons = []
+    if len(changed_files) >= _LARGE_PR_FILE_THRESHOLD:
+        reasons.append(f"changed_files >= {_LARGE_PR_FILE_THRESHOLD}")
+    if changed_lines >= _LARGE_PR_CHANGED_LINE_THRESHOLD:
+        reasons.append(f"changed_lines >= {_LARGE_PR_CHANGED_LINE_THRESHOLD}")
+    return {
+        "changed_files": len(changed_files),
+        "additions": additions,
+        "deletions": deletions,
+        "changed_lines": changed_lines,
+        "large_pr": bool(reasons),
+        "large_pr_reasons": reasons,
+        "large_pr_thresholds": {
+            "changed_files": _LARGE_PR_FILE_THRESHOLD,
+            "changed_lines": _LARGE_PR_CHANGED_LINE_THRESHOLD,
+        },
+    }
 
 
 def _allocate_fair_text_budgets(lengths: list[int], total_budget: int) -> list[int]:
@@ -859,6 +896,30 @@ def _run_specialist_reviews(
             "regression or maintenance burden as reportable even when the code still works on the demonstrated happy "
             "path. Do not prefer a different design merely because it is possible."
         ),
+        "scope_complexity": (
+            "Perform an exceptionally strict scope and complexity audit. Infer the PR's claimed functionality or fix from "
+            "the pull_request title and body, then verify the claim against the actual diff and existing contracts. Build a "
+            "minimal obligation list: the behavior required for the fix, compatibility work required by existing callers, "
+            "and the smallest tests and documentation needed to prove it. Apply a deletion test to every added file, symbol, "
+            "class, method, helper, branch, flag, configuration field, wrapper, conversion, allocation, comment, and test: if "
+            "removing or collapsing it would preserve the required behavior and supported contracts, treat it as unnecessary "
+            "scope and report it. Group adjacent excess with one root cause instead of commenting on every line separately. "
+            "Be particularly skeptical of drive-by refactors, speculative extensibility, parallel abstractions, forwarding "
+            "layers, one-use helpers, duplicated validation, configurable mechanisms with one real mode, defensive branches "
+            "for impossible states, and abstractions introduced only to support tests. Require every class to justify itself "
+            "through meaningful owned state, resource lifetime, lifecycle invariants, or a required polymorphic interface; a "
+            "stateless namespace, single-call wrapper, or record with no behavior should normally be a function, direct call, "
+            "or existing data structure. Prefer pure functions, explicit data flow, flat contiguous arrays, batched tensor or "
+            "Warp operations, and established dispatch boundaries over object graphs, per-item objects, nested containers, "
+            "Python element loops, repeated materialization, adapter chains, or state split across owners. Check whether each "
+            "new representation can remain in the existing array form without copies or conversions. A simpler alternative is "
+            "reportable when the supplied adjacent code or repository guidance establishes it and the current design adds "
+            "concrete review, maintenance, ownership, synchronization, allocation, or runtime cost; this is not an invitation "
+            "to propose merely aesthetic rewrites. Use category scope_complexity and state exactly what can be deleted, "
+            "flattened, made functional, vectorized, or reused while preserving the PR's required behavior. For an objectively "
+            "large PR or one containing independently shippable concerns, use the specialist summary to propose two to five "
+            "dependency-ordered PR slices, each with a coherent behavior, affected area, and validation boundary."
+        ),
         "api_contract": (
             "Perform a deliberately picky compatibility audit of every public, documented, serialized, CLI, "
             "configuration, registration, and extension-facing contract touched by the diff. Compare the old and new "
@@ -1111,6 +1172,11 @@ Review rules:
   test-quality defect, not a missing-test request. Passing, increasing line coverage, or exercising a code path does not
   establish value. A direct junk-pattern match or a demonstrated duplicate owner is sufficient evidence; do not require
   proof that the test can never catch any conceivable bug.
+- Scope and complexity are explicit review requirements. Apply the deletion test to every added construct: would removing,
+  inlining, flattening, vectorizing, or reusing an existing mechanism preserve the PR's required behavior and supported
+  contracts? If yes, report the unnecessary code and its concrete maintenance, ownership, allocation, synchronization, or
+  review cost. Prefer functional data flow and flat array operations. A class must justify meaningful state, resources,
+  lifecycle invariants, or required polymorphism. This evidence-based simplicity check is not an optional-refactor request.
 - If the failure path is incomplete or the concern is only a design preference, omit it.
 - Use critical only for correctness, security, data-loss, or severe compatibility defects.
 - Return every finding that satisfies this high bar, ordered by severity and impact; do not add filler.
@@ -1135,6 +1201,10 @@ Required review protocol:
    never assume it works merely because a thin delegation or source-inspection test exists. When tests are changed, audit
    every function, parametrized row or axis, fixture, helper, scene build, and test-only production seam against the
    authoring gate and compare it with the supplied existing test ownership evidence.
+8. Build a line-necessity ledger for every added file and construct: required behavior or compatibility obligation, simpler
+   established alternative, and the cost of retaining the extra code. Do not return zero findings while an added construct
+   has no required responsibility. For large or multi-concern PRs, identify dependency-ordered slices that can be reviewed,
+   tested, and landed independently.
 """
     return _request_model_completion(
         model,
@@ -1159,13 +1229,13 @@ them. The repository_instructions, contribution_guidance, test_audit_guidance, r
 related_existing_tests, and ci_test_routing fields come from the trusted base and are review criteria or evidence only.
 Treat specialist claims as hypotheses, not facts, and re-check every claim against the supplied patch and file context.
 
-Produce one short unified review covering design and architecture, public or extension-facing API contracts,
-compatibility and deprecation, implementation quality, exact style consistency, and the value and non-duplication of
-changed tests. Apply a skeptical maintainer standard: inspect small semantic differences and concrete maintenance costs,
-and do not require an obvious crash, an external bug report, or agreement between specialists. Precision remains
-mandatory, but the requested main, style, and test audits are deliberately picky: do not discard a directly evidenced
-defect merely because it is non-functional or appropriately classified as a suggestion. Do not mention specialists,
-agents, pipelines, models, or multiple review passes.
+Produce one short unified review covering design and architecture, scope and complexity, public or extension-facing API
+contracts, compatibility and deprecation, implementation quality, exact style consistency, and the value and
+non-duplication of changed tests. Apply a skeptical maintainer standard: inspect small semantic differences and concrete
+maintenance costs, and do not require an obvious crash, an external bug report, or agreement between specialists.
+Precision remains mandatory, but the requested complexity, style, and test audits are deliberately picky: do not discard
+a directly evidenced defect merely because it is non-functional or appropriately classified as a suggestion. Do not
+mention specialists, agents, pipelines, models, or multiple review passes.
 
 A final finding is allowed only when all of these are true:
 1. It was introduced by this diff and is anchored to an added line.
@@ -1174,6 +1244,15 @@ A final finding is allowed only when all of these are true:
 3. It has a concrete API, architectural, user, style-consistency, test-quality, or maintenance impact. An exact
    contribution-guide, adjacent-code, or test-audit violation satisfies this condition even without runtime impact.
 4. The proposed correction is specific and proportionate.
+
+Treat simplicity as a maintained contract. Independently perform a deletion test over every added file, abstraction,
+class, method, helper, branch, flag, wrapper, representation, conversion, allocation, comment, and test. Retain only code
+required for the stated functionality, supported compatibility, or independently necessary validation. Prefer the
+repository's established functional, explicit-data-flow, flat-array, batched tensor, and Warp patterns. Require a class to
+own meaningful state, resources, lifecycle invariants, or required polymorphism; otherwise prefer a function or existing
+data structure. Accept scope_complexity findings when the current diff adds directly evidenced maintenance, ownership,
+synchronization, allocation, runtime, or review cost that an established simpler form avoids. Do not dismiss these as
+optional refactors, but do reject purely aesthetic alternatives that cannot identify deletable code or concrete cost.
 
 Every incompatible change to an existing supported contract that lacks a complete deprecation cycle is a finding, not a
 non-blocking observation. Classify it as compatibility and use at least warning severity. A complete transition keeps the
@@ -1213,6 +1292,20 @@ Before accepting a no-finding result, explicitly check these common cross-cuttin
   duplicate fixtures, scenes, backends, parameter axes, or production transformations supplied in the test-audit context.
   Group sibling cases with the same redundancy into one finding, but do not silently retain any added case that fails the
   gate.
+- Every added construct passes the deletion test and has one necessary responsibility. Stateless namespace classes,
+  single-call wrappers, one-use forwarding helpers, speculative extension points, duplicated validation, object-per-item
+  representations, avoidable nested containers, element-wise Python loops, representation churn, and unrelated drive-by
+  cleanup are findings when an established functional or flat-array path preserves the required behavior.
+
+The scope_complexity_assessment must evaluate whether the diff is the smallest coherent implementation of the stated PR
+goal. REVIEW_INPUT.change_summary sets large_pr when the diff reaches 20 files or 1,000 changed lines. When large_pr is
+true, or when the diff contains multiple independently shippable concerns at any size, begin this assessment with
+``Suggested PR breakdown:`` and give two to five dependency-ordered slices. Name the behavior and affected subsystem of
+each slice and its focused validation boundary; separate preparatory refactors, API/deprecation work, backend
+implementation, tests, documentation, and cleanup when they can stand alone. Do not give vague advice such as "split the
+tests" or propose slices that cannot build or be reviewed independently. When the scope is cohesive and below the size
+threshold, state ``Scope is cohesive; no split recommended.`` A split proposal is review guidance, not an inline finding
+by itself.
 
 Specialist repetition is not proof. Independently validate each claim and discard it when evidence is incomplete,
 subjective, speculative, or merely an alternative design. Style-only and test-only findings are explicitly in scope when
@@ -1226,16 +1319,17 @@ Before returning no findings, independently repeat the required specialist proto
 trusting empty specialist results. Account for every changed file, build the old-versus-new compatibility ledger, and
 actively try to falsify the proposed no-finding result. Return no findings only after each plausible failure path has
 been checked and lacks direct supporting evidence. Even when no inline finding clears the evidence threshold, the
-summary and all six assessments must remain useful and specific to this pull request: state the design approach reviewed,
-exact API surface checked, compatibility and deprecation result, important implementation paths traced,
-style/local-pattern checks performed, and which changed tests were audited for necessity and duplication. The
+summary and all seven assessments must remain useful and specific to this pull request: state the design approach reviewed,
+scope and complexity result, exact API surface checked, compatibility and deprecation result, important implementation
+paths traced, style/local-pattern checks performed, and which changed tests were audited for necessity and duplication. The
 compatibility assessment must begin with ``Breaking changes: none identified.`` or ``Breaking changes:`` followed by an
 explicit list of the breaks and deprecation gaps. If no tests changed, say so in the test assessment. Never use generic
 phrases such as "No material concerns" or "No issues found" as an assessment. Use the "No blocking issues" verdict only
 when the findings list is empty and no breaking change lacks a deprecation cycle.
 
-Deduplicate accepted findings and return every finding that satisfies this high bar; do not add filler. Keep the
-summary and each assessment to one or two sentences. Keep finding titles under 10 words and bodies under 80 words.
+Deduplicate accepted findings and return every finding that satisfies this high bar; do not add filler. Keep the summary
+and each assessment to one or two sentences, except that a scope breakdown may use one compact sentence per proposed
+slice. Keep finding titles under 10 words and bodies under 80 words.
 Every finding must use a path, line, and side from valid_added_line_ranges (RIGHT) or valid_deleted_line_ranges (LEFT).
 Use only the verdicts in the output schema. Human maintainers own approval decisions, so never approve or request
 changes.
@@ -1298,6 +1392,14 @@ filler, repeats qualifications, is stale, or is substantially longer than its us
 reasoning, invariants, safety constraints, units, frames, and workarounds remain valuable. Never claim or imply that a
 contributor used AI; review only the text's concrete clarity, redundancy, accuracy, and maintenance cost.
 
+For scope_complexity candidates, apply the deletion test yourself. Accept the finding when the added construct has no
+required responsibility for the stated behavior or supported compatibility and the candidate identifies a simpler
+established functional, flat-array, batched, direct-call, or existing-mechanism path plus concrete maintenance, ownership,
+synchronization, allocation, runtime, or review cost. In particular, require classes to justify meaningful state,
+resources, lifecycle invariants, or required polymorphism. Do not label deletion, flattening, vectorization, or reuse as an
+optional refactor merely because the current implementation works. Reject preferences that cannot identify what code is
+unnecessary or how the simpler form preserves behavior.
+
 Be especially skeptical of a proposed no-finding result for a removed or changed contract. Accept every directly
 evidenced breaking change that lacks a complete deprecation bridge, using the same old-contract-functional, targeted
 warning, migration documentation, removal guidance, and transition-coverage criteria as the candidate review. A
@@ -1310,14 +1412,17 @@ location, or reinterpret one as a different issue. Return the IDs of accepted fi
 unsupported claims, but do not raise the bar from directly evidenced and actionable to already reproduced or
 release-blocking.
 
-Rewrite the short overall summary and all six assessments to match only the accepted findings. The compatibility
+Rewrite the short overall summary and all seven assessments to match only the accepted findings. Independently verify the
+scope_complexity_assessment against REVIEW_INPUT.change_summary. If large_pr is true or multiple independent concerns are
+present, preserve or correct a concrete ``Suggested PR breakdown:`` with two to five dependency-ordered, independently
+reviewable slices and focused validation boundaries. Otherwise state ``Scope is cohesive; no split recommended.`` The compatibility
 assessment must begin with ``Breaking changes: none identified.`` or ``Breaking changes:`` followed by the identified
 breaks and deprecation gaps. If none survive, preserve useful PR-specific feedback: name the concrete design decision
-reviewed, API surface checked, compatibility ledger result, implementation paths traced, style and adjacent-pattern
-checks performed, tests audited for necessity and duplication, and any non-blocking tradeoff or residual risk. If no
-tests changed, say so in the test assessment. Do not use generic "No material concerns" boilerplate. Use the "No
-blocking issues" verdict only when no findings survive and no breaking change lacks a deprecation cycle. Human
-maintainers own approval decisions, so never approve or request changes.
+reviewed, scope and line-necessity result, API surface checked, compatibility ledger result, implementation paths traced,
+style and adjacent-pattern checks performed, tests audited for necessity and duplication, and any non-blocking tradeoff
+or residual risk. If no tests changed, say so in the test assessment. Do not use generic "No material concerns"
+boilerplate. Use the "No blocking issues" verdict only when no findings survive and no breaking change lacks a
+deprecation cycle. Human maintainers own approval decisions, so never approve or request changes.
 """
     candidate_findings = candidate_review.get("findings")
     if not isinstance(candidate_findings, list):
@@ -1370,6 +1475,7 @@ maintainers own approval decisions, so never approve or request changes.
         for key in (
             "summary",
             "design_architecture",
+            "scope_complexity_assessment",
             "api_assessment",
             "compatibility_assessment",
             "implementation_assessment",
@@ -1524,6 +1630,7 @@ def _aggregate_schema() -> dict[str, Any]:
             "properties": {
                 "summary": {"type": "string"},
                 "design_architecture": {"type": "string"},
+                "scope_complexity_assessment": {"type": "string"},
                 "api_assessment": {"type": "string"},
                 "compatibility_assessment": {"type": "string"},
                 "implementation_assessment": {"type": "string"},
@@ -1538,6 +1645,7 @@ def _aggregate_schema() -> dict[str, Any]:
             "required": [
                 "summary",
                 "design_architecture",
+                "scope_complexity_assessment",
                 "api_assessment",
                 "compatibility_assessment",
                 "implementation_assessment",
@@ -1560,6 +1668,7 @@ def _critic_schema() -> dict[str, Any]:
             "properties": {
                 "summary": {"type": "string"},
                 "design_architecture": {"type": "string"},
+                "scope_complexity_assessment": {"type": "string"},
                 "api_assessment": {"type": "string"},
                 "compatibility_assessment": {"type": "string"},
                 "implementation_assessment": {"type": "string"},
@@ -1577,6 +1686,7 @@ def _critic_schema() -> dict[str, Any]:
             "required": [
                 "summary",
                 "design_architecture",
+                "scope_complexity_assessment",
                 "api_assessment",
                 "compatibility_assessment",
                 "implementation_assessment",
@@ -1602,6 +1712,7 @@ def _finding_schema() -> dict[str, Any]:
                 "type": "string",
                 "enum": [
                     "design_architecture",
+                    "scope_complexity",
                     "api",
                     "compatibility",
                     "implementation",
@@ -1746,6 +1857,10 @@ def _build_review_body(
         _clean_text(aggregated.get("design_architecture"), 1_000)
         or "The review did not return a design and architecture assessment."
     )
+    scope_complexity_assessment = (
+        _clean_text(aggregated.get("scope_complexity_assessment"), 2_000)
+        or "The review did not return a scope and complexity assessment."
+    )
     api_assessment = (
         _clean_text(aggregated.get("api_assessment"), 1_000) or "The review did not return an API assessment."
     )
@@ -1788,6 +1903,7 @@ def _build_review_body(
 {summary}
 
 - **Design and architecture:** {design_architecture}
+- **Scope and complexity:** {scope_complexity_assessment}
 - **API:** {api_assessment}
 - **Compatibility and deprecation:** {compatibility_assessment}
 - **Implementation:** {implementation_assessment}
