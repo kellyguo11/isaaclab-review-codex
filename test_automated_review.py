@@ -107,6 +107,7 @@ def test_review_context_preserves_complete_patch_and_changed_line_excerpts(monke
     assert serialized["contribution_guidance"] == "Trusted instructions"
     assert serialized["test_audit_guidance"] == "Trusted instructions"
     assert serialized["test_audit_context"]["changed_test_files"] == []
+    assert serialized["scope_complexity_context"]["added_source_files"] == []
     assert serialized["change_summary"] == {
         "changed_files": 1,
         "additions": 1,
@@ -186,6 +187,73 @@ def test_review_context_adds_bounded_test_audit_evidence(monkeypatch) -> None:
     assert "source/pkg/test/test_widget_existing.py" in audit_context["repository_test_inventory"]
     assert audit_context["related_existing_tests"][0]["path"] == "source/pkg/test/test_widget_existing.py"
     assert audit_context["ci_test_routing"] == "TIMEOUTS = {}\n"
+
+
+def test_review_context_adds_existing_owner_evidence_for_new_source_modules(monkeypatch) -> None:
+    """New modules should include unchanged neighboring owners from the base branch."""
+    reviewer = _load_review_module()
+    source_path = "tools/perf_smoke/paired.py"
+    pull_request = {
+        "number": 10,
+        "title": "Pair benchmark measurements",
+        "body": "Add paired benchmark collection.",
+        "user": {"login": "author"},
+        "base": {"ref": "develop", "sha": "base-sha"},
+        "head": {"ref": "feature", "sha": "head-sha"},
+    }
+    changed_files = [
+        {
+            "filename": source_path,
+            "status": "added",
+            "additions": 2,
+            "deletions": 0,
+            "patch": "@@ -0,0 +1,2 @@\n+def pair():\n+    pass\n",
+            "raw_url": f"https://raw.githubusercontent.com/example/repo/head/{source_path}",
+        }
+    ]
+
+    def fake_repository_file(repository, path, ref, token):
+        files = {
+            "AGENTS.md": "Trusted instructions",
+            "docs/source/refs/contributing.rst": "Coding Style\n------------\nUse existing owners.",
+            "skills/developer/test-audit/SKILL.md": "Audit tests.",
+            "tools/perf_smoke/cli.py": "def main():\n    pass\n",
+            "tools/perf_smoke/compare.py": "def compare():\n    pass\n",
+            "tools/packaging.py": "def package():\n    pass\n",
+        }
+        return files.get(path, "")
+
+    monkeypatch.setattr(reviewer, "_fetch_repository_file", fake_repository_file)
+    monkeypatch.setattr(
+        reviewer,
+        "_github_json",
+        lambda path, token: {
+            "tree": [
+                {"type": "blob", "path": "tools/perf_smoke/cli.py"},
+                {"type": "blob", "path": "tools/perf_smoke/compare.py"},
+                {"type": "blob", "path": "tools/perf_smoke/test_compare.py"},
+                {"type": "blob", "path": "tools/packaging.py"},
+                {"type": "blob", "path": "source/unrelated.py"},
+            ],
+            "truncated": False,
+        },
+    )
+    monkeypatch.setattr(reviewer, "_fetch_raw_file", lambda url: ("def pair():\n    pass\n", False))
+
+    review_input = reviewer._build_review_input("example/repo", pull_request, changed_files, "token")
+    scope_context = json.loads(review_input.serialized)["scope_complexity_context"]
+
+    assert scope_context["added_source_files"] == [source_path]
+    assert "tools/perf_smoke/cli.py" in scope_context["affected_directory_inventory"]
+    assert "tools/perf_smoke/test_compare.py" in scope_context["affected_directory_inventory"]
+    assert {entry["path"] for entry in scope_context["related_existing_files"]} == {
+        "tools/packaging.py",
+        "tools/perf_smoke/cli.py",
+        "tools/perf_smoke/compare.py",
+    }
+    assert all("test_compare.py" not in entry["path"] for entry in scope_context["related_existing_files"])
+    assert all("unrelated.py" not in entry["path"] for entry in scope_context["related_existing_files"])
+    assert scope_context["evidence_scope"].startswith("Unchanged neighboring source files")
 
 
 def test_change_summary_marks_large_review_surfaces() -> None:
@@ -503,6 +571,12 @@ def test_specialist_ensemble_runs_every_role_on_every_model(monkeypatch) -> None
     assert "Apply a deletion test to every added file" in instructions["scope_complexity"]
     assert "Require every class to justify itself" in instructions["scope_complexity"]
     assert "flat contiguous arrays" in instructions["scope_complexity"]
+    assert "Build an existing-owner ledger for every added source module and class" in instructions["scope_complexity"]
+    assert "Separation into clean modules is not itself evidence" in instructions["scope_complexity"]
+    assert "Perform a greenfield compression pass" in instructions["scope_complexity"]
+    assert "one parallel subsystem" in instructions["scope_complexity"]
+    assert "Simplify before splitting" in instructions["scope_complexity"]
+    assert "replacing the current PR with that single smaller change" in instructions["scope_complexity"]
     assert "dependency-ordered PR slices" in instructions["scope_complexity"]
     assert "internal zero-copy wrapper escaping" in instructions["api_contract"]
     assert (
@@ -558,8 +632,8 @@ def test_specialist_ensemble_uses_configured_concurrency(monkeypatch) -> None:
     assert captured["max_workers"] == 10
 
 
-def test_non_test_specialists_omit_large_test_audit_evidence() -> None:
-    """Only the test specialist should receive duplicate full-test and inventory context."""
+def test_specialists_receive_only_their_expanded_repository_evidence() -> None:
+    """Only the matching specialist should receive each expanded evidence set."""
     reviewer = _load_review_module()
     review_input = json.dumps(
         {
@@ -573,13 +647,25 @@ def test_non_test_specialists_omit_large_test_audit_evidence() -> None:
                 "related_existing_tests": [{"path": "test_existing.py", "current_file": "large related test"}],
                 "ci_test_routing": "large CI routing file",
             },
+            "scope_complexity_context": {
+                "added_source_files": ["source/new_module.py"],
+                "affected_directory_inventory": ["source/existing.py"],
+                "inventory_truncated": False,
+                "related_existing_files": [{"path": "source/existing.py", "base_file": "large existing owner"}],
+            },
         }
     )
 
-    test_input = reviewer._specialist_review_input(review_input, "test_quality")
+    test_input = json.loads(reviewer._specialist_review_input(review_input, "test_quality"))
+    scope_input = json.loads(reviewer._specialist_review_input(review_input, "scope_complexity"))
     implementation_input = json.loads(reviewer._specialist_review_input(review_input, "implementation_quality"))
 
-    assert test_input == review_input
+    assert test_input["test_audit_context"]["related_existing_tests"][0]["path"] == "test_existing.py"
+    assert test_input["scope_complexity_context"]["affected_directory_inventory"] == []
+    assert test_input["scope_complexity_context"]["related_existing_files"] == []
+    assert scope_input["scope_complexity_context"]["affected_directory_inventory"] == ["source/existing.py"]
+    assert scope_input["scope_complexity_context"]["related_existing_files"][0]["base_file"] == "large existing owner"
+    assert scope_input["test_audit_context"]["related_existing_tests"] == []
     assert implementation_input["files"][0]["current_file"] == "visible to every specialist"
     assert implementation_input["test_audit_context"]["changed_test_files"] == [
         {"path": "test_widget.py", "complete": True}
@@ -587,6 +673,8 @@ def test_non_test_specialists_omit_large_test_audit_evidence() -> None:
     assert implementation_input["test_audit_context"]["repository_test_inventory"] == []
     assert implementation_input["test_audit_context"]["related_existing_tests"] == []
     assert implementation_input["test_audit_context"]["ci_test_routing"] == ""
+    assert implementation_input["scope_complexity_context"]["affected_directory_inventory"] == []
+    assert implementation_input["scope_complexity_context"]["related_existing_files"] == []
 
 
 def test_specialist_prompt_requires_adversarial_review_before_no_findings(monkeypatch) -> None:
@@ -634,6 +722,9 @@ def test_specialist_prompt_requires_adversarial_review_before_no_findings(monkey
     assert "Apply the deletion test to every added construct" in prompt
     assert "Prefer functional data flow and flat array operations" in prompt
     assert "Build a line-necessity ledger" in prompt
+    assert "build an existing-owner ledger from scope_complexity_context" in prompt
+    assert "Perform a greenfield compression pass over the whole feature" in prompt
+    assert "Simplify the architecture before proposing" in prompt
     assert "Build an explicit compatibility ledger" in prompt
     assert "valid_deleted_line_ranges (LEFT)" in prompt
     assert "A changelog, migration note, major-version claim" in prompt
@@ -686,6 +777,12 @@ def test_aggregation_prompt_rechecks_every_file_before_no_findings(monkeypatch) 
     assert "do not silently retain any added case that fails the gate" in prompt
     assert "Every added construct passes the deletion test" in prompt
     assert "Stateless namespace classes" in prompt
+    assert "compare every added source module and class with unchanged neighboring owners" in prompt
+    assert "Evaluate a set of private modules serving one workflow as a single parallel subsystem" in prompt
+    assert "Minimal implementation:" in prompt
+    assert "every added source module as keep, merge, or delete" in prompt
+    assert "Replace with one smaller PR:" in prompt
+    assert "Simplify before splitting" in prompt
     assert "Suggested PR breakdown:" in prompt
     assert "20 files or 1,000 changed lines" in prompt
     assert "Scope is cohesive; no split recommended." in prompt
@@ -786,7 +883,13 @@ def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -
     assert "Never claim or imply that a contributor used AI" in prompt
     assert "apply the deletion test yourself" in prompt
     assert "functional, flat-array, batched" in prompt
+    assert "related_existing_files as direct evidence" in prompt
+    assert "greenfield vertical implementation in the existing entry point and owners" in prompt
     assert "Do not label deletion, flattening, vectorization, or reuse as an optional refactor" in prompt
+    assert "Minimal implementation:" in prompt
+    assert "every added source module as keep, merge, or delete" in prompt
+    assert "Replace with one smaller PR:" in prompt
+    assert "Never convert unnecessary abstractions into separate PR slices" in prompt
     assert "Suggested PR breakdown:" in prompt
     assert "LEFT-side findings on deleted lines" in prompt
     assert "old-contract-functional" in prompt

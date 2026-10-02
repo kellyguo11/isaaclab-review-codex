@@ -26,6 +26,18 @@ standard: they compare deleted behavior with its replacement line by line,
 trace boundary and failure paths,
 and report directly evidenced semantic, integration, architectural, API, and
 maintainability defects even when they do not produce an immediate crash.
+For every newly added source module or class, the scope pass builds an
+existing-owner ledger: required responsibility, nearest unchanged owner on the
+base branch, why that owner cannot absorb the behavior, and which new layers
+can disappear if it can. Clean separation alone does not justify a new
+subsystem. The bot first proposes the smallest implementation using existing
+CLI, data-flow, storage, comparison, reporting, and lifecycle boundaries, and
+only then proposes PR slices for the remaining necessary work. It also performs
+a greenfield compression pass over the feature as a whole: several private
+modules serving one workflow are treated as one parallel subsystem, and every
+new source module must be classified as keep, merge, or delete. If compression
+turns a large submission into one cohesive vertical change, the bot recommends
+one smaller replacement PR rather than splitting the unnecessary framework.
 The API pass builds an old-versus-new compatibility ledger for every touched
 contract, including import paths, signatures, defaults, runtime types, shapes,
 units, ordering, configuration keys, CLI flags, registry IDs, exceptions,
@@ -42,8 +54,8 @@ parametrized row or axis, fixture, helper, scene build, and test-only production
 seam. Each must own a distinct observable contract at the strongest boundary,
 catch a credible product regression for the intended reason, and add value not
 already supplied by existing coverage. Merely executing code or increasing
-coverage does not justify a test. Opus 5 then conservatively aggregates all ten
-results into one review; GPT-5.6 Sol handles aggregation if
+coverage does not justify a test. Opus 5 then conservatively aggregates all
+twelve results into one review; GPT-5.6 Sol handles aggregation if
 Opus is unavailable. Before publication, GPT-5.6 Sol independently checks every
 candidate issue against the diff and rejects anything that does not clearly
 need fixing; Opus handles this verification if GPT is unavailable. The verifier
@@ -71,10 +83,15 @@ coding and unit-testing contribution guidance and its `test-audit` skill. When
 tests change, the bot also includes bounded full changed-test content, the base
 test inventory, related existing tests, and CI test routing so duplication and
 test ownership findings have repository evidence. That expanded test evidence
-is sent only to the dedicated test-quality specialist; other specialists still
-receive the changed-file patches and excerpts but do not receive redundant full
-test files and inventory data. If only supplemental context is limited, the
-review explicitly states that the full diff was still reviewed.
+is sent only to the dedicated test-quality specialist. When a PR adds source
+modules, the bot also includes a bounded inventory and the contents of nearby
+unchanged source files from the trusted base branch. That expanded
+existing-owner evidence is sent only to the scope-and-complexity specialist.
+Other specialists still receive the changed-file patches and excerpts but do
+not receive redundant full test or neighboring-source files and inventory
+data. Aggregation and final verification receive both evidence sets. If only
+supplemental context is limited, the review explicitly states that the full
+diff was still reviewed.
 
 The review policy requires every specialist to inspect every patch hunk, compare
 deleted behavior with its replacement, trace changed producers and consumers,
@@ -84,11 +101,15 @@ registrations, configuration and CLI forwarding, templates, examples,
 documentation includes, and per-package changelog obligations. Files converted
 to thin delegates, moved modules, and renamed symbols receive extra scrutiny.
 The bot records total changed files, additions, deletions, and changed lines. A
-PR is objectively marked large at 20 files or 1,000 changed lines. Large PRs—and
-smaller PRs containing independently shippable concerns—receive a concrete,
-dependency-ordered proposal for two to five smaller PRs, including each slice's
-behavior, affected subsystem, and focused validation boundary. Cohesive smaller
-PRs are explicitly reported as not needing a split.
+submitted PR is objectively marked large at 20 files or 1,000 changed lines.
+The scope assessment first derives the minimal implementation and never turns
+avoidable abstractions into separate PR slices. If compression leaves one
+cohesive vertical change, the bot proposes one smaller replacement PR. Only
+when the remaining necessary work still contains independent concerns does it
+give a dependency-ordered proposal for two to five smaller PRs, including each
+slice's behavior, affected subsystem, and focused validation boundary. Cohesive
+changes already close to the submitted size are explicitly reported as not
+needing a split.
 
 It reports every finding that clears the evidence threshold, with no numerical
 cap, and rejects hypothetical edge cases, generic missing-test requests,
