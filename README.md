@@ -11,9 +11,12 @@ Every pull request is reviewed by a two-model ensemble:
 - `azure/anthropic/claude-opus-5`
 - `azure/openai/gpt-5.6-sol`
 
-Each model independently runs six specialist passes: design and architecture,
+Each model independently runs seven specialist passes: design and architecture,
 scope and complexity, API contracts, implementation quality, style consistency,
-and test quality. The scope pass applies a deletion test to every added file,
+test quality, and PR description quality. Each specialist owns its review area;
+the final judge checks evidence, consolidates overlapping findings, and decides
+what deserves publication. The scope pass applies a deletion test to every added
+file,
 class, helper, branch, wrapper, configuration option, conversion, comment, and
 test: if the PR's required behavior and supported contracts survive without it,
 the bot reports the unnecessary code. Classes must justify meaningful state,
@@ -55,16 +58,16 @@ seam. Each must own a distinct observable contract at the strongest boundary,
 catch a credible product regression for the intended reason, and add value not
 already supplied by existing coverage. Merely executing code or increasing
 coverage does not justify a test. Opus 5 then conservatively aggregates all
-twelve results into one review; GPT-5.6 Sol handles aggregation if
+fourteen results into one review; GPT-5.6 Sol handles aggregation if
 Opus is unavailable. Before publication, GPT-5.6 Sol independently checks every
 candidate issue against the diff and rejects anything that does not clearly
 need fixing; Opus handles this verification if GPT is unavailable. The verifier
 can accept or reject existing candidate IDs but cannot invent or relocate
-findings. A normal review therefore makes fourteen NVIDIA inference requests. If
+findings. A normal review therefore makes sixteen NVIDIA inference requests. If
 verification fails with both models, nothing is posted.
-Up to ten of the twelve specialist requests run concurrently by default. This
-keeps the added complexity audit without serializing all specialist work; the
-remaining requests begin as soon as a worker is available.
+Up to ten of the fourteen specialist requests run concurrently by default. This
+keeps the specialist work concurrent; remaining requests begin as soon as a worker
+is available.
 Aggregation and pre-publication verification remain sequential because each
 depends on the preceding result.
 Each request allows up to 65,536 output tokens so reasoning models have enough
@@ -138,6 +141,28 @@ compatibility surface checked, the implementation paths traced, and concrete
 non-blocking tradeoffs or residual risks. It uses `No blocking issues` for that
 outcome rather than treating the automated review as an approval or saying
 `Ship it`.
+
+The description specialist compares the PR title and body with the actual diff.
+It calls out stale scope, unsupported claims, and prose that obscures the problem,
+resulting behavior, or validation. Feedback appears in the top-level review,
+without attaching description problems to unrelated code lines. For performance
+claims or material hot-path changes, it requests a reproducible before/after
+comparison with the metric, hardware, backend, environment count, and measurement
+setup. It does not demand benchmarks for ordinary documentation or style changes
+and never invents measurements. The final judge independently verifies this
+feedback alongside the code findings.
+
+Non-blocking suggestions are posted inline with a literal `nit:` prefix. Small
+naming, documentation, consistency, and readability improvements still need
+concrete repository evidence and a specific correction. Repeated instances with
+one root cause are consolidated, and there is no comment quota. A review with
+only nits reports **No blocking issues**; warnings and critical defects retain
+their severity. A nit cannot displace a stronger issue at the same location.
+
+The bot speaks like a grumpy veteran maintainer: terse, technically precise,
+skeptical of unnecessary machinery, with occasional dry wit about the code.
+It stays respectful to contributors, gives concrete fixes, and does not claim
+personal credentials. Evidence and clarity take precedence over personality.
 
 The bot calls NVIDIA's OpenAI-compatible
 `https://inference-api.nvidia.com/v1/chat/completions` endpoint directly. It
@@ -286,7 +311,7 @@ unset NVIDIA_INFERENCE_API_KEY
 
 ## 5. Run a safe dry run
 
-A dry run reads one non-draft PR, runs the full eight-request ensemble, and
+A dry run reads one non-draft PR, runs the full sixteen-request ensemble, and
 prints the proposed review. It requests a read-only GitHub App token and cannot
 post:
 
@@ -426,8 +451,8 @@ or service configuration.
   an on-demand review comment.
 - The reviewed commit SHA is embedded in each bot review to prevent duplicate
   reviews after ordinary restarts.
-- A PR head is rechecked immediately before posting; a result is discarded if
-  the PR changed during inference.
+- The PR head, title, and body are rechecked immediately before posting; a
+  result is discarded if any changed during inference.
 - The service restarts automatically after transient failures.
 
 The process refuses to start if `GH_TOKEN`, `GITHUB_TOKEN`,
