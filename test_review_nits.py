@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Runtime regressions for non-blocking inline nits and finding severity."""
+"""Runtime regressions for published finding severity."""
 
 from __future__ import annotations
 
@@ -24,13 +24,13 @@ def _finding(severity: str, category: str = "style_consistency") -> dict:
     }
 
 
-def test_suggestion_only_review_posts_inline_nit_without_blocking_verdict(monkeypatch) -> None:
-    """A critic's stale strong verdict must not turn accepted nits into blocking issues."""
+def test_suggestion_is_promoted_to_inline_warning(monkeypatch) -> None:
+    """Legacy suggestion output should publish as a warning."""
     reviewer = _load_review_module()
     monkeypatch.setattr(
         reviewer,
         "_request_verification_completion",
-        lambda *args: {"accepted_finding_ids": [0], "verdict": "Needs rework"},
+        lambda *args: {"accepted_finding_ids": [0], "verdict": "No blocking issues"},
     )
     verified = reviewer._review_candidate_review("{}", {"findings": [_finding("suggestion")]}, ("model",), "key")
     validated = reviewer._validate_findings(verified["findings"], {"source/example.py": {"RIGHT": {8}}})
@@ -44,23 +44,24 @@ def test_suggestion_only_review_posts_inline_nit_without_blocking_verdict(monkey
     monkeypatch.setattr(reviewer, "_github_json", capture_post)
     reviewer._post_review("owner/repo", 1, "head", body, validated, "token")
 
-    assert verified["verdict"] == "No blocking issues"
-    assert "**No blocking issues.**" in captured["body"]
+    assert verified["findings"][0]["severity"] == "warning"
+    assert verified["verdict"] == "Minor fixes needed"
+    assert "**Minor fixes needed.**" in captured["body"]
     assert captured["event"] == "COMMENT"
     assert len(captured["comments"]) == 1
     comment = captured["comments"][0]
     assert (comment["path"], comment["line"], comment["side"]) == ("source/example.py", 8, "RIGHT")
-    assert comment["body"].startswith("nit:")
+    assert comment["body"].startswith("🟡 Warning")
     assert "Rename the added variable" in comment["body"]
 
 
-@pytest.mark.parametrize("nit_first", [True, False])
-def test_nit_cannot_suppress_critical_issue_at_same_location(nit_first) -> None:
-    """Input ordering must not hide a serious finding behind a nit at the same line."""
+@pytest.mark.parametrize("suggestion_first", [True, False])
+def test_promoted_suggestion_cannot_suppress_critical_issue_at_same_location(suggestion_first) -> None:
+    """Input ordering must not hide a critical finding behind a promoted warning."""
     reviewer = _load_review_module()
-    nit = _finding("suggestion")
+    suggestion = _finding("suggestion")
     critical = {**_finding("critical", "implementation"), "title": "Reset leaves stale state"}
-    findings = [nit, critical] if nit_first else [critical, nit]
+    findings = [suggestion, critical] if suggestion_first else [critical, suggestion]
 
     validated = reviewer._validate_findings(findings, {"source/example.py": {"RIGHT": {8}}})
     comments = reviewer._build_inline_comments(validated)
@@ -68,7 +69,7 @@ def test_nit_cannot_suppress_critical_issue_at_same_location(nit_first) -> None:
     assert len(comments) == 1
     assert "Critical" in comments[0]["body"]
     assert "Reset leaves stale state" in comments[0]["body"]
-    assert not comments[0]["body"].startswith("nit:")
+    assert comments[0]["body"].startswith("🔴 Critical")
 
 
 @pytest.mark.parametrize(
@@ -76,6 +77,7 @@ def test_nit_cannot_suppress_critical_issue_at_same_location(nit_first) -> None:
     [
         ("warning", "implementation", "Minor fixes needed"),
         ("critical", "implementation", "Significant concerns"),
+        ("suggestion", "style_consistency", "Minor fixes needed"),
         ("suggestion", "compatibility", "Minor fixes needed"),
     ],
 )
@@ -95,4 +97,29 @@ def test_retained_serious_findings_override_non_blocking_critic_verdict(
 
     assert verified["verdict"] == expected_verdict
     assert f"**{expected_verdict}.**" in body
-    assert not reviewer._build_inline_comments(findings)[0]["body"].startswith("nit:")
+    assert reviewer._build_inline_comments(findings)[0]["body"].startswith(("🟡 Warning", "🔴 Critical"))
+
+
+def test_finding_schema_only_allows_warning_or_critical() -> None:
+    """Models should not be asked to emit suggestion severity."""
+    reviewer = _load_review_module()
+
+    assert reviewer._finding_schema()["properties"]["severity"]["enum"] == ["critical", "warning"]
+
+
+def test_author_facing_findings_are_hard_limited() -> None:
+    """Validation should bound verbose model output before publication."""
+    reviewer = _load_review_module()
+    finding = {
+        **_finding("suggestion"),
+        "title": "This title contains far too many words for a useful inline review comment",
+        "body": " ".join(f"word{index}" for index in range(60)),
+    }
+
+    validated = reviewer._validate_findings([finding], {"source/example.py": {"RIGHT": {8}}})
+    comment = reviewer._build_inline_comments(validated)[0]["body"]
+
+    assert validated[0]["severity"] == "warning"
+    assert len(validated[0]["title"].removesuffix("…").split()) == reviewer._MAX_FINDING_TITLE_WORDS
+    assert len(validated[0]["body"].removesuffix("…").split()) == reviewer._MAX_FINDING_BODY_WORDS
+    assert comment.startswith("🟡 Warning")

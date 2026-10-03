@@ -118,11 +118,12 @@ It reports every finding that clears the evidence threshold, with no numerical
 cap, and rejects hypothetical edge cases, generic missing-test requests,
 logging preferences, optional hardening, alternative designs, and unsupported
 personal preferences. Exact formatting, naming, typing, documentation, local
-style, and test-value violations are intentionally reportable even when their
-appropriate severity is only a suggestion. An unchanged downstream consumer
-broken by an added or deleted line is considered introduced by the PR and remains
-reportable. Breaking changes are highlighted in a dedicated compatibility and
-deprecation assessment and are warnings at minimum when they lack a transition.
+style, and test-value violations are intentionally reportable. Every retained
+non-critical finding is published as a warning; the bot does not publish a
+lower suggestion or nit level. An unchanged downstream consumer broken by an
+added or deleted line is considered introduced by the PR and remains reportable.
+Breaking changes are highlighted in a dedicated compatibility and deprecation
+assessment and are warnings at minimum when they lack a transition.
 A changelog, migration note, major-version claim, or replacement API alone does
 not count as a deprecation cycle: the old contract must remain functional for
 the repository-prescribed window, use the established targeted warning with
@@ -132,15 +133,16 @@ lines instead of dropping deletion-only API breaks. Deterministic contract,
 repository-rule, style, documentation-integration, test-audit, type, and
 producer/consumer failures do
 not require a runtime reproduction or a specific external caller to be
-reported. The bot posts concise explanatory comments and does not generate
-GitHub replacement-code suggestion blocks.
+reported. Inline titles are limited to seven words and explanations to 35 words.
+Each comment states only the defect, consequence, and smallest fix. The bot does
+not generate GitHub replacement-code suggestion blocks.
 
-When no inline finding clears the evidence threshold, the bot still posts
-pull-request-specific feedback: the design approach reviewed, the exact API or
-compatibility surface checked, the implementation paths traced, and concrete
-non-blocking tradeoffs or residual risks. It uses `No blocking issues` for that
-outcome rather than treating the automated review as an approval or saying
-`Ship it`.
+The top-level review is deliberately compact: one summary sentence followed by
+only the PR-description, scope, and compatibility results. The summary and
+ordinary assessments are limited to 35 words; scope may use up to 80 words for
+a concrete minimal design or split. Inline comments carry the remaining details.
+When no inline finding survives verification, the bot uses `No blocking issues`
+without treating the result as an approval.
 
 The description specialist compares the PR title and body with the actual diff.
 It calls out stale scope, unsupported claims, and prose that obscures the problem,
@@ -152,17 +154,11 @@ setup. It does not demand benchmarks for ordinary documentation or style changes
 and never invents measurements. The final judge independently verifies this
 feedback alongside the code findings.
 
-Non-blocking suggestions are posted inline with a literal `nit:` prefix. Small
-naming, documentation, consistency, and readability improvements still need
+Small naming, documentation, consistency, and readability findings still need
 concrete repository evidence and a specific correction. Repeated instances with
-one root cause are consolidated, and there is no comment quota. A review with
-only nits reports **No blocking issues**; warnings and critical defects retain
-their severity. A nit cannot displace a stronger issue at the same location.
-
-The bot speaks like a grumpy veteran maintainer: terse, technically precise,
-skeptical of unnecessary machinery, with occasional dry wit about the code.
-It stays respectful to contributors, gives concrete fixes, and does not claim
-personal credentials. Evidence and clarity take precedence over personality.
+one root cause are consolidated, and there is no comment quota. The bot uses a
+terse senior-maintainer voice with plain, direct language and no preamble,
+praise, repetition, dry wit, or roleplay.
 
 The bot calls NVIDIA's OpenAI-compatible
 `https://inference-api.nvidia.com/v1/chat/completions` endpoint directly. It

@@ -55,8 +55,13 @@ _REQUEST_TIMEOUT_SECONDS = 600
 _MODEL_REQUEST_TIMEOUT_SECONDS = 900
 _LARGE_PR_FILE_THRESHOLD = 20
 _LARGE_PR_CHANGED_LINE_THRESHOLD = 1_000
+_MAX_FINDING_TITLE_WORDS = 7
+_MAX_FINDING_BODY_WORDS = 35
+_MAX_REVIEW_SUMMARY_WORDS = 35
+_MAX_REVIEW_ASSESSMENT_WORDS = 35
+_MAX_SCOPE_ASSESSMENT_WORDS = 80
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
-_SEVERITY_ORDER = {"critical": 0, "warning": 1, "suggestion": 2}
+_SEVERITY_ORDER = {"critical": 0, "warning": 1}
 _FINDING_CATEGORIES = {
     "design_architecture",
     "scope_complexity",
@@ -67,17 +72,14 @@ _FINDING_CATEGORIES = {
     "test_quality",
 }
 _REVIEW_VOICE = (
-    "Write like a grumpy old coding wizard: a terse, seasoned maintainer with the judgment of a veteran engineer. "
-    "Use precise language idioms and repository contracts verified from the supplied context. Lead with evidence and "
-    "a concrete fix; let the personality show through direct wording and occasional dry wit aimed at the code. "
-    "Keep useful non-blocking nits concise. Avoid personal insults, condescension, invented authority, theatrical "
-    "roleplay, and claims of actually having thirty years of experience."
+    "Write like a terse senior maintainer. State only the defect, its concrete consequence, and the smallest required "
+    "fix. Lead with the key point. Use plain, direct language with no preamble, praise, repetition, dry wit, rhetorical "
+    "flourish, roleplay, or commentary about the review process."
 )
 _VERDICTS = ("No blocking issues", "Minor fixes needed", "Significant concerns", "Needs rework")
 _SEVERITY_LABELS = {
     "critical": "🔴 Critical",
     "warning": "🟡 Warning",
-    "suggestion": "🔵 Suggestion",
 }
 _HUNK_HEADER_PATTERN = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 _SOURCE_FILE_SUFFIXES = (".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp", ".py", ".pyi", ".rs", ".sh")
@@ -1133,7 +1135,7 @@ def _run_specialist_reviews(
             "Perform a deliberately picky style and consistency review. Treat contribution_guidance and "
             "repository_instructions as authoritative, then compare every changed construct with adjacent code in the "
             "supplied current-file context. Flag every directly evidenced deviation, even when its impact is only "
-            "consistency or maintainability and the appropriate severity is suggestion. Enforce the new lean-code "
+            "consistency or maintainability and the appropriate severity is warning. Enforce the new lean-code "
             "guidance from PR 8117: prefer plain functions for stateless work; retain classes only for meaningful state, "
             "resources, lifecycle invariants, or architectural interfaces; reuse existing mechanisms; avoid one-line "
             "helpers and forwarding wrappers; use direct attribute access for known fields; keep state and validation "
@@ -1349,8 +1351,9 @@ Review rules:
 - Trace the relevant path across all supplied files and current-file excerpts. Do not invent code that is not present.
 - Findings must reference a path, line, and side listed in that file's valid_added_line_ranges (RIGHT) or
   valid_deleted_line_ranges (LEFT). Use LEFT for a removed contract when no added line is the direct cause.
-- Explain the demonstrated impact and the smallest appropriate fix. Keep the title under 10 words and the body under
-  80 words. Always use an empty suggestion; the bot does not post generated replacement-code blocks.
+- Explain the demonstrated impact and smallest fix. Keep the title to at most 7 words and the body to at most 35 words.
+  Prefer one direct sentence. Omit background already evident from the diff. Always use an empty suggestion; the bot does
+  not post generated replacement-code blocks.
 - Do not report hypothetical edge cases, possible future problems, missing tests, logging preferences, optional
   hardening, alternative designs, praise, or pre-existing issues in unchanged code. Exact style, formatting, naming,
   documentation, consistency, duplication, and test-value defects are intentional exceptions when directly established
@@ -1385,11 +1388,11 @@ Review rules:
   to identify the existing owner and require a concrete reason for adding a parallel module, class, representation, or
   workflow. This evidence-based simplicity check is not an optional-refactor request.
 - If the failure path is incomplete or the concern is only a design preference, omit it.
-- Small non-blocking improvements are welcome when a trusted rule or adjacent code establishes the better form.
-  Use suggestion severity for these nits, with a specific correction and proportionate explanation.
-  Do not demand a runtime failure or material impact for a grounded nit. Comment independently on distinct changed
-  lines when they have distinct actionable improvements, consolidate one root cause, and never chase a comment quota.
+- Grounded style, documentation, consistency, and maintainability defects remain actionable when a trusted rule or
+  adjacent pattern establishes the correction; classify them as warning. Do not demand a runtime failure, but consolidate
+  one root cause and never chase a comment quota.
 - Use critical only for correctness, security, data-loss, or severe compatibility defects.
+- Use warning for every other retained finding. Never emit suggestion severity.
 - Return every finding that satisfies this high bar, ordered by severity and impact; do not add filler.
 
 Required review protocol:
@@ -1456,10 +1459,9 @@ contracts, compatibility and deprecation, implementation quality, exact style co
 non-duplication of changed tests. Apply a skeptical maintainer standard: inspect small semantic differences and concrete
 maintenance costs, and do not require an obvious crash, an external bug report, or agreement between specialists.
 Precision remains mandatory, but the requested complexity, style, and test audits are deliberately picky: do not discard
-a directly evidenced defect merely because it is non-functional or appropriately classified as a suggestion.
-Preserve useful small non-blocking nits backed by trusted guidance or adjacent patterns; they need a concrete clarity or
-consistency benefit and correction, not a runtime failure or material impact. Keep suggestion severity for nits.
-Consolidate repeated root causes, retain distinct actionable line improvements, and impose no comment quota. Do not
+a directly evidenced defect merely because it is non-functional. Preserve grounded style, documentation, consistency,
+and maintainability defects backed by trusted guidance or adjacent patterns; classify every retained non-critical finding
+as warning. Consolidate repeated root causes, retain distinct actionable line improvements, and impose no comment quota. Do not
 mention specialists, agents, pipelines, models, or multiple review passes.
 
 A final finding is allowed only when all of these are true:
@@ -1575,12 +1577,14 @@ paths traced, style/local-pattern checks performed, and which changed tests were
 compatibility assessment must begin with ``Breaking changes: none identified.`` or ``Breaking changes:`` followed by an
 explicit list of the breaks and deprecation gaps. If no tests changed, say so in the test assessment. Never use generic
 phrases such as "No material concerns" or "No issues found" as an assessment. Use the "No blocking issues" verdict only
-when no critical or warning finding remains and no breaking change lacks a deprecation cycle; non-blocking suggestions
-and nits may remain.
+when no finding remains and no breaking change lacks a deprecation cycle.
 
-Deduplicate accepted findings and return every finding that satisfies this high bar; do not add filler. Keep the summary
-and each assessment to one or two sentences, except that a scope breakdown may use one compact sentence per proposed
-slice. Keep finding titles under 10 words and bodies under 80 words.
+Deduplicate accepted findings and return every finding that satisfies this high bar; do not add filler. The summary must
+be one sentence of at most 35 words and lead with the most important result. Each assessment must be one sentence of at
+most 35 words; scope_complexity_assessment may use at most 80 words for a concrete minimal design or split. Do not repeat
+inline-finding details across the summary and assessments. Keep finding titles to at most 7 words and bodies to at most
+35 words. Use critical only for correctness, security, data loss, or severe compatibility defects; use warning for every
+other finding and never emit suggestion severity.
 Every finding must use a path, line, and side from valid_added_line_ranges (RIGHT) or valid_deleted_line_ranges (LEFT).
 Use only the verdicts in the output schema. Human maintainers own approval decisions, so never approve or request
 changes.
@@ -1625,15 +1629,13 @@ Review the proposed review itself before anything is posted. Re-check every cand
 current-file context, and trusted repository instructions. Accept a finding when the supplied evidence directly supports
 that the pull request introduced a concrete design, architecture, API, compatibility, implementation,
 style-consistency, or test-quality problem that needs fixing, a specific maintainability concern, or a grounded
-non-blocking improvement. A suggestion need not be release-blocking, but it must identify an exact changed construct,
-demonstrated violation, cost,
-duplication, or ambiguity, and a proportionate correction. Explicit contract changes, deterministic language or
+improvement. It must identify an exact changed construct, demonstrated violation, cost, duplication, or ambiguity, and a
+proportionate correction. Explicit contract changes, deterministic language or
 framework behavior, changed producer/consumer paths, broken unchanged consumers, documentation integration failures,
 trusted repository rules, exact contribution-guide or adjacent-code inconsistencies, and test-audit violations supported
-by the supplied test context are valid evidence without a runtime reproduction. Accept small non-blocking nits with
-concrete clarity or consistency benefits when trusted guidance or adjacent code
-establishes the correction; do not require a runtime failure or material impact. Preserve suggestion severity for nits,
-and consolidate repeated root causes without deleting distinct actionable line improvements.
+by the supplied test context are valid evidence without a runtime reproduction. Accept grounded clarity or consistency
+defects when trusted guidance or adjacent code establishes the correction; do not require a runtime failure. Elevate every
+retained suggestion to warning, and consolidate repeated root causes without deleting distinct actionable improvements.
 Reject ungrounded optional improvements, alternative designs, personal preferences, generic missing-test requests,
 speculative risks, and claims whose failure
 path or asserted duplication depends on missing context. Do not reject a finding merely because it is style-only or
@@ -1704,8 +1706,10 @@ reviewed, scope and line-necessity result, API surface checked, compatibility le
 style and adjacent-pattern checks performed, tests audited for necessity and duplication, and any non-blocking tradeoff
 or residual risk. If no tests changed, say so in the test assessment. Do not use generic "No material concerns"
 boilerplate. Use the "No blocking issues" verdict only when no critical or warning finding survives and no breaking
-change lacks a deprecation cycle; non-blocking suggestions and nits may remain. Human maintainers own approval decisions,
-so never approve or request changes.
+change lacks a deprecation cycle. Keep the summary to one sentence of at most 35 words, each assessment to one sentence
+of at most 35 words, scope_complexity_assessment to at most 80 words, titles to 7 words, and finding bodies to 35 words.
+State only the key point, consequence, and fix; remove repeated evidence and background. Human maintainers own approval
+decisions, so never approve or request changes.
 """
     )
     candidate_findings = candidate_review.get("findings")
@@ -1752,7 +1756,10 @@ so never approve or request changes.
         ):
             continue
         seen_ids.add(candidate_id)
-        accepted_findings.append(findings_by_id[candidate_id])
+        finding = dict(findings_by_id[candidate_id])
+        if finding.get("severity") == "suggestion":
+            finding["severity"] = "warning"
+        accepted_findings.append(finding)
 
     verified = {
         key: critic_result.get(key)
@@ -1770,12 +1777,7 @@ so never approve or request changes.
         )
     }
     verified["findings"] = accepted_findings
-    severities = {
-        "warning"
-        if finding.get("category") == "compatibility" and finding.get("severity") == "suggestion"
-        else finding.get("severity")
-        for finding in accepted_findings
-    }
+    severities = {finding.get("severity") for finding in accepted_findings}
     if not severities.intersection({"critical", "warning"}):
         verified["verdict"] = "No blocking issues"
     elif "critical" in severities and verified["verdict"] not in {"Significant concerns", "Needs rework"}:
@@ -2020,9 +2022,9 @@ def _finding_schema() -> dict[str, Any]:
                     "test_quality",
                 ],
             },
-            "severity": {"type": "string", "enum": ["critical", "warning", "suggestion"]},
-            "title": {"type": "string"},
-            "body": {"type": "string"},
+            "severity": {"type": "string", "enum": ["critical", "warning"]},
+            "title": {"type": "string", "maxLength": 96},
+            "body": {"type": "string", "maxLength": 320},
             "suggestion": {"type": "string", "const": ""},
         },
         "required": ["path", "line", "side", "category", "severity", "title", "body", "suggestion"],
@@ -2106,16 +2108,16 @@ def _validate_findings(
         side = finding.get("side", "RIGHT")
         category = finding.get("category")
         severity = finding.get("severity")
-        title = _clean_text(finding.get("title"), 160)
-        body = _clean_text(finding.get("body"), 1_000)
+        title = _concise_text(finding.get("title"), _MAX_FINDING_TITLE_WORDS, 160)
+        body = _concise_text(finding.get("body"), _MAX_FINDING_BODY_WORDS, 1_000)
         if not isinstance(path, str) or not isinstance(line, int) or isinstance(line, bool):
             continue
         if side not in {"LEFT", "RIGHT"} or category not in _FINDING_CATEGORIES:
             continue
+        if severity == "suggestion":
+            severity = "warning"
         if severity not in _SEVERITY_ORDER or line not in valid_lines.get(path, {}).get(side, set()):
             continue
-        if category == "compatibility" and severity == "suggestion":
-            severity = "warning"
         if not title or not body:
             continue
         location = (path, side, line)
@@ -2152,36 +2154,21 @@ def _build_review_body(
     patches_truncated: bool = False,
 ) -> str:
     """Build the unified top-level review body."""
-    summary = _clean_text(aggregated.get("summary"), 1_000) or "The automated review completed."
-    description_assessment = (
-        _clean_text(aggregated.get("description_assessment"), 2_000)
-        or "The review did not return a PR description assessment."
+    summary = (
+        _concise_text(aggregated.get("summary"), _MAX_REVIEW_SUMMARY_WORDS, 1_000)
+        or "Review completed without a summary."
     )
-    design_architecture = (
-        _clean_text(aggregated.get("design_architecture"), 1_000)
-        or "The review did not return a design and architecture assessment."
+    description_assessment = (
+        _concise_text(aggregated.get("description_assessment"), _MAX_REVIEW_ASSESSMENT_WORDS, 2_000)
+        or "No PR description issue."
     )
     scope_complexity_assessment = (
-        _clean_text(aggregated.get("scope_complexity_assessment"), 2_000)
-        or "The review did not return a scope and complexity assessment."
-    )
-    api_assessment = (
-        _clean_text(aggregated.get("api_assessment"), 1_000) or "The review did not return an API assessment."
+        _concise_text(aggregated.get("scope_complexity_assessment"), _MAX_SCOPE_ASSESSMENT_WORDS, 2_000)
+        or "No scope issue."
     )
     compatibility_assessment = (
-        _clean_text(aggregated.get("compatibility_assessment"), 1_000)
-        or "The review did not return a compatibility and deprecation assessment."
-    )
-    implementation_assessment = (
-        _clean_text(aggregated.get("implementation_assessment"), 1_000)
-        or "The review did not return an implementation assessment."
-    )
-    style_assessment = (
-        _clean_text(aggregated.get("style_assessment"), 1_000)
-        or "The review did not return a style consistency assessment."
-    )
-    test_assessment = (
-        _clean_text(aggregated.get("test_assessment"), 1_000) or "The review did not return a test quality assessment."
+        _concise_text(aggregated.get("compatibility_assessment"), _MAX_REVIEW_ASSESSMENT_WORDS, 1_000)
+        or "Breaking changes: none identified."
     )
     verdict = aggregated.get("verdict")
     severities = {finding["severity"] for finding in findings}
@@ -2194,11 +2181,9 @@ def _build_review_body(
 
     if findings:
         action = "Would post" if preview else "Posted"
-        finding_summary = f"{action} {len(findings)} actionable finding{'s' if len(findings) != 1 else ''} inline."
+        finding_summary = f"{action} {len(findings)} inline finding{'s' if len(findings) != 1 else ''}."
     else:
-        finding_summary = (
-            "No inline issue met the actionable-evidence threshold; the assessment above records the review feedback."
-        )
+        finding_summary = "No inline findings."
     if patches_truncated:
         truncation_note = "\n\n> The PR exceeded the automated context budget, so part of the diff was truncated."
     elif context_truncated:
@@ -2210,13 +2195,8 @@ def _build_review_body(
 {summary}
 
 - **PR description:** {description_assessment}
-- **Design and architecture:** {design_architecture}
-- **Scope and complexity:** {scope_complexity_assessment}
-- **API:** {api_assessment}
+- **Scope:** {scope_complexity_assessment}
 - **Compatibility and deprecation:** {compatibility_assessment}
-- **Implementation:** {implementation_assessment}
-- **Style consistency:** {style_assessment}
-- **Test quality:** {test_assessment}
 
 **{verdict}.** {finding_summary}{truncation_note}
 
@@ -2287,9 +2267,12 @@ def _build_inline_comments(findings: list[dict[str, Any]]) -> list[dict[str, Any
     """Build GitHub inline review comments from validated findings."""
     comments = []
     for finding in findings:
-        label = "nit:" if finding["severity"] == "suggestion" else _SEVERITY_LABELS[finding["severity"]]
+        severity = "warning" if finding["severity"] == "suggestion" else finding["severity"]
+        label = _SEVERITY_LABELS[severity]
         category = str(finding["category"]).replace("_", " ").title()
-        comment_body = f"{label} · {category} — **{finding['title']}**\n\n{finding['body']}"
+        title = _concise_text(finding["title"], _MAX_FINDING_TITLE_WORDS, 160)
+        body = _concise_text(finding["body"], _MAX_FINDING_BODY_WORDS, 1_000)
+        comment_body = f"{label} · {category} — **{title}**\n\n{body}"
         comments.append(
             {
                 "path": finding["path"],
@@ -2330,3 +2313,12 @@ def _clean_text(value: Any, limit: int) -> str:
     """Normalize bounded model or pull-request text."""
     text = str(value or "").replace(f"<!-- {_MARKER_PREFIX}", "<!-- marker-removed:")
     return text.strip()[:limit]
+
+
+def _concise_text(value: Any, word_limit: int, character_limit: int) -> str:
+    """Normalize text and enforce a word limit for author-facing output."""
+    text = _clean_text(value, character_limit)
+    words = text.split()
+    if len(words) <= word_limit:
+        return text
+    return " ".join(words[:word_limit]).rstrip(" ,;:") + "…"

@@ -404,6 +404,7 @@ def test_validate_findings_accepts_scope_style_and_test_quality_categories() -> 
         "test_quality",
     }
     assert all(finding["side"] == "RIGHT" for finding in validated)
+    assert all(finding["severity"] == "warning" for finding in validated)
 
 
 def test_validate_findings_accepts_breaking_change_on_deleted_line() -> None:
@@ -704,6 +705,10 @@ def test_specialist_prompt_requires_adversarial_review_before_no_findings(monkey
     assert "runtime reproduction is not required" in prompt
     assert "incompatible change to an existing public type" in prompt
     assert "Always use an empty suggestion" in prompt
+    assert "title to at most 7 words" in prompt
+    assert "body to at most 35 words" in prompt
+    assert "Use warning for every other retained finding" in prompt
+    assert "Never emit suggestion severity" in prompt
     assert "Return every finding that satisfies this high bar" in prompt
     assert "do not add filler" in prompt
     assert "Read every patch hunk" in prompt
@@ -757,6 +762,7 @@ def test_aggregation_prompt_rechecks_every_file_before_no_findings(monkeypatch) 
 
     prompt = " ".join(captured["system_prompt"].split())
     assert "Precision remains mandatory" in prompt
+    assert "classify every retained non-critical finding as warning" in prompt
     assert "Specialist repetition is not proof" in prompt
     assert "missing-test or generic test-coverage observation" in prompt
     assert "deterministic compatibility" in prompt
@@ -793,6 +799,8 @@ def test_aggregation_prompt_rechecks_every_file_before_no_findings(monkeypatch) 
     assert "Breaking changes: none identified." in prompt
     assert "valid_deleted_line_ranges (LEFT)" in prompt
     assert '"No blocking issues"' in prompt
+    assert "summary must be one sentence of at most 35 words" in prompt
+    assert "never emit suggestion severity" in prompt
 
 
 def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -> None:
@@ -894,6 +902,8 @@ def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -
     assert "Suggested PR breakdown:" in prompt
     assert "LEFT-side findings on deleted lines" in prompt
     assert "old-contract-functional" in prompt
+    assert "Elevate every retained suggestion to warning" in prompt
+    assert "summary to one sentence of at most 35 words" in prompt
     assert "all eight assessments" in prompt
     assert "preserve useful" in prompt
     assert "PR-specific feedback" in prompt
@@ -997,12 +1007,15 @@ def test_review_body_keeps_specific_feedback_without_inline_findings() -> None:
     )
 
     assert "The template remains the source of truth" in body
-    assert "**Scope and complexity:** Scope is cohesive; no split recommended." in body
+    assert "**Scope:** Scope is cohesive; no split recommended." in body
     assert "**Compatibility and deprecation:** Breaking changes: none identified." in body
-    assert "**Style consistency:** The template follows adjacent naming and structure." in body
-    assert "**Test quality:** No tests were added or changed." in body
+    assert "**Design and architecture:**" not in body
+    assert "**API:**" not in body
+    assert "**Implementation:**" not in body
+    assert "**Style consistency:**" not in body
+    assert "**Test quality:**" not in body
     assert "**No blocking issues.**" in body
-    assert "No inline issue met the actionable-evidence threshold" in body
+    assert "No inline findings." in body
     assert "No material issues were identified" not in body
     assert "No material concerns" not in body
     assert "_Automated review; human maintainers own approval decisions._" in body
@@ -1042,6 +1055,39 @@ def test_review_body_does_not_call_actionable_findings_non_blocking() -> None:
 
     assert "**Minor fixes needed.**" in body
     assert "**No blocking issues.**" not in body
+
+
+def test_review_body_hard_limits_visible_summary_sections() -> None:
+    """Verbose model assessments should be bounded before authors see them."""
+    reviewer = _load_review_module()
+    verbose = " ".join(f"word{index}" for index in range(120))
+
+    body = reviewer._build_review_body(
+        {
+            "summary": verbose,
+            "description_assessment": verbose,
+            "scope_complexity_assessment": verbose,
+            "compatibility_assessment": verbose,
+            "verdict": "No blocking issues",
+        },
+        [],
+        "<!-- marker -->",
+        context_truncated=False,
+    )
+    lines = body.splitlines()
+    summary = lines[2]
+    description = next(line.removeprefix("- **PR description:** ") for line in lines if "PR description" in line)
+    scope = next(line.removeprefix("- **Scope:** ") for line in lines if "**Scope:**" in line)
+    compatibility = next(
+        line.removeprefix("- **Compatibility and deprecation:** ")
+        for line in lines
+        if "Compatibility and deprecation" in line
+    )
+
+    assert len(summary.removesuffix("…").split()) == reviewer._MAX_REVIEW_SUMMARY_WORDS
+    assert len(description.removesuffix("…").split()) == reviewer._MAX_REVIEW_ASSESSMENT_WORDS
+    assert len(scope.removesuffix("…").split()) == reviewer._MAX_SCOPE_ASSESSMENT_WORDS
+    assert len(compatibility.removesuffix("…").split()) == reviewer._MAX_REVIEW_ASSESSMENT_WORDS
 
 
 def test_existing_review_requires_bot_login_and_matching_sha(monkeypatch) -> None:
