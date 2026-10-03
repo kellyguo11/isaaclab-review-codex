@@ -329,7 +329,7 @@ def test_validate_findings_filters_invalid_locations_and_duplicates() -> None:
         {"source/example.py": {"LEFT": set(), "RIGHT": {8, 10}}},
     )
 
-    assert validated == [{**findings[0], "side": "RIGHT", "suggestion": ""}]
+    assert validated == [{**findings[1], "side": "RIGHT", "suggestion": ""}]
 
 
 def test_validate_findings_has_no_numeric_cap() -> None:
@@ -561,8 +561,9 @@ def test_specialist_ensemble_runs_every_role_on_every_model(monkeypatch) -> None
         "implementation_quality",
         "style_consistency",
         "test_quality",
+        "pr_description",
     )
-    assert len(results) == 12
+    assert len(results) == 14
     assert {(role, model) for role, _, model, _, _ in calls} == {
         (role, model) for role in roles for model in ("opus-model", "gpt-model")
     }
@@ -768,7 +769,7 @@ def test_aggregation_prompt_rechecks_every_file_before_no_findings(monkeypatch) 
     assert "Hydra or preset forwarding" in prompt
     assert "actively try to falsify" in prompt
     assert "broken by an added line" in prompt
-    assert "summary and all seven assessments must remain useful" in prompt
+    assert "summary and all eight assessments must remain useful" in prompt
     assert "complexity, style, and test audits are deliberately picky" in prompt
     assert "Inspect every changed comment and docstring" in prompt
     assert "never speculate about AI authorship" in prompt
@@ -788,7 +789,7 @@ def test_aggregation_prompt_rechecks_every_file_before_no_findings(monkeypatch) 
     assert "Scope is cohesive; no split recommended." in prompt
     assert "Every incompatible change" in prompt
     assert "old-versus-new compatibility ledger" in prompt
-    assert "all seven assessments" in prompt
+    assert "all eight assessments" in prompt
     assert "Breaking changes: none identified." in prompt
     assert "valid_deleted_line_ranges (LEFT)" in prompt
     assert '"No blocking issues"' in prompt
@@ -874,7 +875,7 @@ def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -
     assert "documentation integration failures" in prompt
     assert "impact appears in an unchanged caller" in prompt
     assert "Never create a new finding" in prompt
-    assert "maintainability concern that warrants maintainer action" in prompt
+    assert "specific maintainability concern" in prompt
     assert "do not raise the bar" in prompt
     assert "Do not reject a finding merely because it is style-only or test-only" in prompt
     assert "could catch some unspecified future bug" in prompt
@@ -893,7 +894,7 @@ def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -
     assert "Suggested PR breakdown:" in prompt
     assert "LEFT-side findings on deleted lines" in prompt
     assert "old-contract-functional" in prompt
-    assert "all seven assessments" in prompt
+    assert "all eight assessments" in prompt
     assert "preserve useful" in prompt
     assert "PR-specific feedback" in prompt
     assert captured["output_schema"] == reviewer._critic_schema()
@@ -909,6 +910,7 @@ def test_prepublication_critic_preserves_specific_feedback_without_findings(monk
     def fake_verification(models, system_prompt, user_input, output_schema, api_key):
         return {
             "summary": "The template remains the source of truth for RSL-RL algorithm discovery.",
+            "description_assessment": "The description matches the final template change.",
             "design_architecture": "The new distillation template stays within the existing generator boundary.",
             "scope_complexity_assessment": "Scope is cohesive; no split recommended.",
             "api_assessment": "Existing PPO names and CLI inputs remain accepted.",
@@ -941,6 +943,7 @@ def test_prepublication_critic_preserves_specific_feedback_without_findings(monk
     )
 
     assert verified == {
+        "description_assessment": "The description matches the final template change.",
         "summary": "The template remains the source of truth for RSL-RL algorithm discovery.",
         "design_architecture": "The new distillation template stays within the existing generator boundary.",
         "scope_complexity_assessment": "Scope is cohesive; no split recommended.",
