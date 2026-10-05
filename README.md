@@ -137,12 +137,15 @@ reported. Inline titles are limited to seven words and explanations to 35 words.
 Each comment states only the defect, consequence, and smallest fix. The bot does
 not generate GitHub replacement-code suggestion blocks.
 
-The top-level review is deliberately compact: one summary sentence followed by
-only the PR-description, scope, and compatibility results. The summary and
-ordinary assessments are limited to 35 words; scope may use up to 80 words for
-a concrete minimal design or split. Inline comments carry the remaining details.
-When no inline finding survives verification, the bot uses `No blocking issues`
-without treating the result as an approval.
+The top-level review is deliberately compact but shows every audit category:
+design and architecture, scope and over-engineering, API, compatibility,
+implementation, style consistency, and test quality. Its headline is compiled
+from verified inline findings and highlights only categories needing attention;
+all other category lines use a short affirmative result. Ordinary assessments
+are limited to 35 words, while scope may use up to 80 words for a concrete
+minimal design or split. Inline comments carry the details. When no inline
+finding survives verification, every category reports a clean result and the
+bot uses `No blocking issues` without treating the result as an approval.
 
 The description specialist compares the PR title and body with the actual diff.
 It calls out stale scope, unsupported claims, and prose that obscures the problem,

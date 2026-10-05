@@ -801,6 +801,8 @@ def test_aggregation_prompt_rechecks_every_file_before_no_findings(monkeypatch) 
     assert '"No blocking issues"' in prompt
     assert "summary must be one sentence of at most 35 words" in prompt
     assert "never emit suggestion severity" in prompt
+    assert "For each code category with findings" in prompt
+    assert "publisher builds the visible headline from the verified finding categories" in prompt
 
 
 def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -> None:
@@ -904,6 +906,8 @@ def test_prepublication_critic_can_only_accept_candidate_findings(monkeypatch) -
     assert "old-contract-functional" in prompt
     assert "Elevate every retained suggestion to warning" in prompt
     assert "summary to one sentence of at most 35 words" in prompt
+    assert "For every code category with an accepted finding" in prompt
+    assert "publisher compiles the visible headline from accepted finding categories" in prompt
     assert "all eight assessments" in prompt
     assert "preserve useful" in prompt
     assert "PR-specific feedback" in prompt
@@ -985,8 +989,8 @@ def test_prepublication_critic_fails_closed(monkeypatch) -> None:
         )
 
 
-def test_review_body_keeps_specific_feedback_without_inline_findings() -> None:
-    """A clean review should explain what was checked instead of posting boilerplate."""
+def test_review_body_shows_clean_result_for_every_category() -> None:
+    """A clean review should make every completed audit category visible."""
     reviewer = _load_review_module()
 
     body = reviewer._build_review_body(
@@ -1006,14 +1010,15 @@ def test_review_body_keeps_specific_feedback_without_inline_findings() -> None:
         context_truncated=False,
     )
 
-    assert "The template remains the source of truth" in body
-    assert "**Scope:** Scope is cohesive; no split recommended." in body
-    assert "**Compatibility and deprecation:** Breaking changes: none identified." in body
-    assert "**Design and architecture:**" not in body
-    assert "**API:**" not in body
-    assert "**Implementation:**" not in body
-    assert "**Style consistency:**" not in body
-    assert "**Test quality:**" not in body
+    assert "All reviewed code categories look good." in body
+    assert "**Design and architecture:** Architecture looks good." in body
+    assert "**Scope and over-engineering:** No over-engineering issues." in body
+    assert "**API:** API changes look good." in body
+    assert "**Compatibility and deprecation:** No breaking changes identified." in body
+    assert "**Implementation:** Implementation looks good." in body
+    assert "**Style consistency:** Style consistency looks good." in body
+    assert "**Test quality:** Test quality looks good." in body
+    assert "The template follows adjacent naming and structure." not in body
     assert "**No blocking issues.**" in body
     assert "No inline findings." in body
     assert "No material issues were identified" not in body
@@ -1055,6 +1060,38 @@ def test_review_body_does_not_call_actionable_findings_non_blocking() -> None:
 
     assert "**Minor fixes needed.**" in body
     assert "**No blocking issues.**" not in body
+    assert "**Needs attention:** Compatibility and deprecation (1)." in body
+    assert (
+        "**Compatibility and deprecation:** Breaking changes: the entry point was removed without deprecation." in body
+    )
+    assert "**Implementation:** Implementation looks good." in body
+
+
+def test_review_body_highlights_only_categories_with_findings() -> None:
+    """The headline should identify attention categories and keep the rest affirmative."""
+    reviewer = _load_review_module()
+    findings = [
+        {"category": "implementation", "severity": "warning"},
+        {"category": "implementation", "severity": "warning"},
+        {"category": "test_quality", "severity": "warning"},
+    ]
+
+    body = reviewer._build_review_body(
+        {
+            "implementation_assessment": "Two state transitions bypass the existing lifecycle owner.",
+            "test_assessment": "The new cases duplicate the owner-boundary regression test.",
+            "verdict": "Minor fixes needed",
+        },
+        findings,
+        "<!-- marker -->",
+        context_truncated=False,
+    )
+
+    assert "**Needs attention:** Implementation (2), Test quality (1). Other reviewed categories look good." in body
+    assert "**Implementation:** Two state transitions bypass the existing lifecycle owner." in body
+    assert "**Test quality:** The new cases duplicate the owner-boundary regression test." in body
+    assert "**Design and architecture:** Architecture looks good." in body
+    assert "**Scope and over-engineering:** No over-engineering issues." in body
 
 
 def test_review_body_hard_limits_visible_summary_sections() -> None:
@@ -1070,21 +1107,28 @@ def test_review_body_hard_limits_visible_summary_sections() -> None:
             "compatibility_assessment": verbose,
             "verdict": "No blocking issues",
         },
-        [],
+        [
+            {"category": "scope_complexity", "severity": "warning"},
+            {"category": "compatibility", "severity": "warning"},
+        ],
         "<!-- marker -->",
         context_truncated=False,
     )
     lines = body.splitlines()
     summary = lines[2]
     description = next(line.removeprefix("- **PR description:** ") for line in lines if "PR description" in line)
-    scope = next(line.removeprefix("- **Scope:** ") for line in lines if "**Scope:**" in line)
+    scope = next(
+        line.removeprefix("- **Scope and over-engineering:** ")
+        for line in lines
+        if "**Scope and over-engineering:**" in line
+    )
     compatibility = next(
         line.removeprefix("- **Compatibility and deprecation:** ")
         for line in lines
-        if "Compatibility and deprecation" in line
+        if line.startswith("- **Compatibility and deprecation:** ")
     )
 
-    assert len(summary.removesuffix("…").split()) == reviewer._MAX_REVIEW_SUMMARY_WORDS
+    assert len(summary.removesuffix("…").split()) <= reviewer._MAX_REVIEW_SUMMARY_WORDS
     assert len(description.removesuffix("…").split()) == reviewer._MAX_REVIEW_ASSESSMENT_WORDS
     assert len(scope.removesuffix("…").split()) == reviewer._MAX_SCOPE_ASSESSMENT_WORDS
     assert len(compatibility.removesuffix("…").split()) == reviewer._MAX_REVIEW_ASSESSMENT_WORDS

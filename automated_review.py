@@ -81,6 +81,15 @@ _SEVERITY_LABELS = {
     "critical": "🔴 Critical",
     "warning": "🟡 Warning",
 }
+_REVIEW_CATEGORY_SECTIONS = (
+    ("design_architecture", "Design and architecture", "design_architecture", "Architecture looks good."),
+    ("scope_complexity", "Scope and over-engineering", "scope_complexity_assessment", "No over-engineering issues."),
+    ("api", "API", "api_assessment", "API changes look good."),
+    ("compatibility", "Compatibility and deprecation", "compatibility_assessment", "No breaking changes identified."),
+    ("implementation", "Implementation", "implementation_assessment", "Implementation looks good."),
+    ("style_consistency", "Style consistency", "style_assessment", "Style consistency looks good."),
+    ("test_quality", "Test quality", "test_assessment", "Test quality looks good."),
+)
 _HUNK_HEADER_PATTERN = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 _SOURCE_FILE_SUFFIXES = (".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp", ".py", ".pyi", ".rs", ".sh")
 
@@ -1584,7 +1593,9 @@ be one sentence of at most 35 words and lead with the most important result. Eac
 most 35 words; scope_complexity_assessment may use at most 80 words for a concrete minimal design or split. Do not repeat
 inline-finding details across the summary and assessments. Keep finding titles to at most 7 words and bodies to at most
 35 words. Use critical only for correctness, security, data loss, or severe compatibility defects; use warning for every
-other finding and never emit suggestion severity.
+other finding and never emit suggestion severity. For each code category with findings, make its assessment state only
+the most important root cause. For each category without findings, return one short affirmative sentence. The publisher
+builds the visible headline from the verified finding categories, so do not repeat a finding inventory in summary.
 Every finding must use a path, line, and side from valid_added_line_ranges (RIGHT) or valid_deleted_line_ranges (LEFT).
 Use only the verdicts in the output schema. Human maintainers own approval decisions, so never approve or request
 changes.
@@ -1709,7 +1720,9 @@ boilerplate. Use the "No blocking issues" verdict only when no critical or warni
 change lacks a deprecation cycle. Keep the summary to one sentence of at most 35 words, each assessment to one sentence
 of at most 35 words, scope_complexity_assessment to at most 80 words, titles to 7 words, and finding bodies to 35 words.
 State only the key point, consequence, and fix; remove repeated evidence and background. Human maintainers own approval
-decisions, so never approve or request changes.
+decisions, so never approve or request changes. For every code category with an accepted finding, keep only its most
+important root cause in the assessment. For every category without an accepted finding, return one short affirmative
+sentence. The publisher compiles the visible headline from accepted finding categories.
 """
     )
     candidate_findings = candidate_review.get("findings")
@@ -2145,6 +2158,21 @@ def _validate_findings(
     return validated
 
 
+def _build_findings_summary(category_counts: dict[str, int]) -> str:
+    """Summarize which review categories contain verified findings."""
+    attention = [
+        f"{label} ({category_counts[category]})"
+        for category, label, _, _ in _REVIEW_CATEGORY_SECTIONS
+        if category in category_counts
+    ]
+    if not attention:
+        return "All reviewed code categories look good."
+    summary = f"**Needs attention:** {', '.join(attention)}."
+    if len(attention) < len(_REVIEW_CATEGORY_SECTIONS):
+        summary += " Other reviewed categories look good."
+    return summary
+
+
 def _build_review_body(
     aggregated: dict[str, Any],
     findings: list[dict[str, Any]],
@@ -2154,22 +2182,27 @@ def _build_review_body(
     patches_truncated: bool = False,
 ) -> str:
     """Build the unified top-level review body."""
-    summary = (
-        _concise_text(aggregated.get("summary"), _MAX_REVIEW_SUMMARY_WORDS, 1_000)
-        or "Review completed without a summary."
-    )
+    category_counts: dict[str, int] = {}
+    for finding in findings:
+        category = str(finding.get("category", ""))
+        category_counts[category] = category_counts.get(category, 0) + 1
+    summary = _concise_text(_build_findings_summary(category_counts), _MAX_REVIEW_SUMMARY_WORDS, 1_000)
     description_assessment = (
         _concise_text(aggregated.get("description_assessment"), _MAX_REVIEW_ASSESSMENT_WORDS, 2_000)
         or "No PR description issue."
     )
-    scope_complexity_assessment = (
-        _concise_text(aggregated.get("scope_complexity_assessment"), _MAX_SCOPE_ASSESSMENT_WORDS, 2_000)
-        or "No scope issue."
-    )
-    compatibility_assessment = (
-        _concise_text(aggregated.get("compatibility_assessment"), _MAX_REVIEW_ASSESSMENT_WORDS, 1_000)
-        or "Breaking changes: none identified."
-    )
+    section_lines = []
+    for category, label, assessment_key, clean_assessment in _REVIEW_CATEGORY_SECTIONS:
+        if category in category_counts:
+            word_limit = _MAX_SCOPE_ASSESSMENT_WORDS if category == "scope_complexity" else _MAX_REVIEW_ASSESSMENT_WORDS
+            assessment = _concise_text(aggregated.get(assessment_key), word_limit, 2_000)
+            if not assessment:
+                count = category_counts[category]
+                assessment = f"{count} verified inline finding{'s' if count != 1 else ''} require attention."
+        else:
+            assessment = clean_assessment
+        section_lines.append(f"- **{label}:** {assessment}")
+    category_sections = "\n".join(section_lines)
     verdict = aggregated.get("verdict")
     severities = {finding["severity"] for finding in findings}
     if not severities.intersection({"critical", "warning"}):
@@ -2195,8 +2228,7 @@ def _build_review_body(
 {summary}
 
 - **PR description:** {description_assessment}
-- **Scope:** {scope_complexity_assessment}
-- **Compatibility and deprecation:** {compatibility_assessment}
+{category_sections}
 
 **{verdict}.** {finding_summary}{truncation_note}
 
