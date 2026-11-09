@@ -95,10 +95,14 @@ def test_configuration_uses_nvidia_inference_models(monkeypatch, tmp_path) -> No
 
     assert configuration.inference_api_key == "nvidia-key"
     assert configuration.review_models == (
-        "azure/anthropic/claude-opus-5",
-        "azure/openai/gpt-5.6-sol",
+        "azure/openai/gpt-6-sol",
+        "azure/openai/gpt-6.1-sol",
     )
     assert configuration.max_concurrent_model_requests == 10
+
+    monkeypatch.setenv("NVIDIA_REVIEW_FALLBACK_MODEL", "azure/anthropic/claude-opus-5")
+    with pytest.raises(ValueError, match="Only OpenAI review models are allowed"):
+        local_bot._load_configuration()
 
 
 def test_configuration_accepts_bounded_model_concurrency(monkeypatch, tmp_path) -> None:

@@ -29,6 +29,26 @@ def _load_review_module() -> ModuleType:
     return module
 
 
+def test_inference_rejects_non_openai_models_before_sending(monkeypatch) -> None:
+    """Direct inference calls must enforce the provider policy before using the credential."""
+    reviewer = _load_review_module()
+    requests = []
+
+    def fake_request(url, api_key, **kwargs):
+        requests.append(kwargs["payload"]["model"])
+        return {"choices": [{"message": {"content": '{"summary":"done","findings":[]}'}}]}
+
+    monkeypatch.setattr(reviewer, "_request_json", fake_request)
+    schema = reviewer._specialist_schema()
+    result = reviewer._request_model_completion("azure/openai/gpt-5.6-sol", "system", "input", schema, "key")
+    assert result == {"summary": "done", "findings": []}
+
+    with pytest.raises(ValueError, match="Only OpenAI review models are allowed"):
+        reviewer._request_model_completion("azure/anthropic/claude-opus-5", "system", "input", schema, "key")
+
+    assert requests == ["azure/openai/gpt-5.6-sol"]
+
+
 def test_changed_right_lines_tracks_additions_across_hunks() -> None:
     """Changed left- and right-side lines should be recovered from every diff hunk."""
     reviewer = _load_review_module()
@@ -499,7 +519,7 @@ def test_aggregate_completion_uses_nvidia_endpoint_and_fallback(monkeypatch) -> 
         calls.append((url, token, method, payload))
         assert timeout_seconds == reviewer._MODEL_REQUEST_TIMEOUT_SECONDS
         assert max_attempts == 1
-        if payload["model"] == "primary-model":
+        if payload["model"] == "azure/openai/gpt-5.6-terra":
             raise RuntimeError("primary unavailable")
         return {
             "choices": [
@@ -510,7 +530,7 @@ def test_aggregate_completion_uses_nvidia_endpoint_and_fallback(monkeypatch) -> 
     monkeypatch.setattr(reviewer, "_request_json", fake_request)
 
     result = reviewer._request_aggregate_completion(
-        ("primary-model", "ensemble-model"),
+        ("azure/openai/gpt-5.6-terra", "azure/openai/gpt-5.6-sol"),
         "Review carefully.",
         '{"pull_request":{}}',
         reviewer._specialist_schema(),
@@ -518,7 +538,7 @@ def test_aggregate_completion_uses_nvidia_endpoint_and_fallback(monkeypatch) -> 
     )
 
     assert result == {"summary": "fallback", "findings": []}
-    assert [call[3]["model"] for call in calls] == ["primary-model", "ensemble-model"]
+    assert [call[3]["model"] for call in calls] == ["azure/openai/gpt-5.6-terra", "azure/openai/gpt-5.6-sol"]
     assert all(call[:3] == (reviewer._NVIDIA_CHAT_COMPLETIONS_URL, "nvidia-key", "POST") for call in calls)
     assert calls[1][3]["messages"][0]["role"] == "system"
     assert "JSON Schema" in calls[1][3]["messages"][0]["content"]

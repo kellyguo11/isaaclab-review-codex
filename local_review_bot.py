@@ -283,6 +283,8 @@ def _load_configuration() -> BotConfiguration:
         raise RuntimeError(
             "NVIDIA_REVIEW_MODEL and NVIDIA_REVIEW_FALLBACK_MODEL must name two distinct, non-empty models."
         )
+    for model in review_models:
+        automated_review._validate_openai_model(model)
     private_key_path = Path(_required_env("ISAACLAB_REVIEW_APP_PRIVATE_KEY_PATH")).expanduser().resolve()
     return BotConfiguration(
         repository=repository,

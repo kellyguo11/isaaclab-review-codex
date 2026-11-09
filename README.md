@@ -8,8 +8,8 @@ another review from the PR conversation.
 
 Every pull request is reviewed by a two-model ensemble:
 
-- `azure/anthropic/claude-opus-5`
-- `azure/openai/gpt-5.6-sol`
+- `azure/openai/gpt-6-sol`
+- `azure/openai/gpt-6.1-sol`
 
 Each model independently runs seven specialist passes: design and architecture,
 scope and complexity, API contracts, implementation quality, style consistency,
@@ -57,11 +57,11 @@ parametrized row or axis, fixture, helper, scene build, and test-only production
 seam. Each must own a distinct observable contract at the strongest boundary,
 catch a credible product regression for the intended reason, and add value not
 already supplied by existing coverage. Merely executing code or increasing
-coverage does not justify a test. Opus 5 then conservatively aggregates all
-fourteen results into one review; GPT-5.6 Sol handles aggregation if
-Opus is unavailable. Before publication, GPT-5.6 Sol independently checks every
+coverage does not justify a test. GPT-6 Sol then conservatively aggregates all
+fourteen results into one review; GPT-6.1 Sol handles aggregation if
+GPT-6 Sol is unavailable. Before publication, GPT-6.1 Sol independently checks every
 candidate issue against the diff and rejects anything that does not clearly
-need fixing; Opus handles this verification if GPT is unavailable. The verifier
+need fixing; GPT-6 Sol handles this verification if GPT-6.1 Sol is unavailable. The verifier
 can accept or reject existing candidate IDs but cannot invent or relocate
 findings. A normal review therefore makes sixteen NVIDIA inference requests. If
 verification fails with both models, nothing is posted.
@@ -248,14 +248,16 @@ ISAACLAB_REVIEW_APP_PRIVATE_KEY_PATH=/home/your-user/.config/isaaclab-review-bot
 ISAACLAB_REVIEW_APP_CLIENT_ID=Iv23liPhQICNbdPQ9bBU
 GITHUB_REPOSITORY=isaac-sim/IsaacLab
 NVIDIA_INFERENCE_API_KEY=<PASTE-THE-NVIDIA-KEY-HERE>
-NVIDIA_REVIEW_MODEL=azure/anthropic/claude-opus-5
-NVIDIA_REVIEW_FALLBACK_MODEL=azure/openai/gpt-5.6-sol
+NVIDIA_REVIEW_MODEL=azure/openai/gpt-6-sol
+NVIDIA_REVIEW_FALLBACK_MODEL=azure/openai/gpt-6.1-sol
 NVIDIA_REVIEW_MAX_CONCURRENT_REQUESTS=10
 ```
 
 Despite its legacy name, `NVIDIA_REVIEW_FALLBACK_MODEL` is always used as the
 second ensemble reviewer. It is also the fallback for final aggregation when
 the primary model fails and the first-choice pre-publication verifier.
+Both settings must use OpenAI model routes (for example, `azure/openai/...`).
+Non-OpenAI models are rejected at startup and before every inference request.
 `NVIDIA_REVIEW_MAX_CONCURRENT_REQUESTS` accepts `1` through `10`. The default
 of `10` starts all specialist requests in one wave. Reduce it if the NVIDIA
 endpoint consistently returns rate-limit responses.

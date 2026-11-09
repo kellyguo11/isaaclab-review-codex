@@ -27,8 +27,8 @@ _NVIDIA_CHAT_COMPLETIONS_URL = "https://inference-api.nvidia.com/v1/chat/complet
 _GITHUB_API_VERSION = "2022-11-28"
 _BOT_LOGIN = "isaaclab-review-bot[bot]"
 _MARKER_PREFIX = "isaaclab-review-bot:sha="
-_DEFAULT_MODEL = "azure/anthropic/claude-opus-5"
-_DEFAULT_ENSEMBLE_MODEL = "azure/openai/gpt-5.6-sol"
+_DEFAULT_MODEL = "azure/openai/gpt-6-sol"
+_DEFAULT_ENSEMBLE_MODEL = "azure/openai/gpt-6.1-sol"
 _MAX_CONTEXT_CHARS = 2_100_000
 _MAX_FETCHED_FILE_CHARS = 1_000_000
 _MAX_REPOSITORY_INSTRUCTIONS_CHARS = 50_000
@@ -1869,6 +1869,13 @@ def _request_completion_with_fallback(
     raise RuntimeError(f"NVIDIA inference failed for every configured model: {'; '.join(failures)}")
 
 
+def _validate_openai_model(model: str) -> None:
+    """Reject inference routes whose model provider is not OpenAI."""
+    parts = model.split("/")
+    if len(parts) < 3 or parts[-2] != "openai" or not parts[-1]:
+        raise ValueError(f"Only OpenAI review models are allowed, not {model!r}.")
+
+
 def _request_model_completion(
     model: str,
     system_prompt: str,
@@ -1877,6 +1884,7 @@ def _request_model_completion(
     api_key: str,
 ) -> dict[str, Any]:
     """Request and decode one structured completion from one ensemble model."""
+    _validate_openai_model(model)
     payload = _chat_completions_payload(model, system_prompt, user_input, output_schema)
     response = _request_json(
         _NVIDIA_CHAT_COMPLETIONS_URL,
